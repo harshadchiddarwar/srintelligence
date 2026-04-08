@@ -13,11 +13,18 @@ function getGreeting() {
   return "Good evening";
 }
 
+function newThreadId() {
+  return `thread-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
 export default function ChatHome() {
   const router = useRouter();
 
-  const handleSubmit = () => {
-    router.push(`/chat/thread-1`);
+  const handleSubmit = (query: string) => {
+    const id = newThreadId();
+    // Stash the first query so the thread page can fire it immediately
+    sessionStorage.setItem(`pendingQuery:${id}`, query);
+    router.push(`/chat/${id}`);
   };
 
   return (
@@ -39,6 +46,9 @@ export default function ChatHome() {
           </p>
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             What would you like to analyze?
+          </p>
+          <p className="text-xs mt-1" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
+            Powered by Cortex Analyst · CORTEX_TESTCASE
           </p>
         </div>
 
@@ -78,7 +88,7 @@ export default function ChatHome() {
       {/* Chat input pinned to bottom */}
       <div className="px-6 pb-6 max-w-4xl w-full mx-auto">
         <ChatInput
-          placeholder="▌ Ask a question..."
+          placeholder="▌ Ask a question about your data…"
           onSubmit={handleSubmit}
           autoFocus
         />

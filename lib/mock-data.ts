@@ -483,9 +483,9 @@ const accessTables: SemanticTable[] = [
 
 export const semanticModels: SemanticModel[] = [
   {
-    id: "rx-model",
-    name: "DataExplore",
-    description: "Rx claims, drug reference, physicians & plans",
+    id: "cortex-testcase",
+    name: "CORTEX_TESTCASE",
+    description: "Live Snowflake semantic view — Rx, drug, physician & plan data",
     tables: semanticTables,
   },
   {

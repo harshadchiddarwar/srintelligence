@@ -9,6 +9,7 @@ interface ChatInputProps {
   onSubmit: (value: string) => void;
   autoFocus?: boolean;
   compact?: boolean;
+  disabled?: boolean;
 }
 
 export default function ChatInput({
@@ -16,6 +17,7 @@ export default function ChatInput({
   onSubmit,
   autoFocus = false,
   compact = false,
+  disabled = false,
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [selectedModelId, setSelectedModelId] = useState<string | "multiple">(semanticModels[0].id);
@@ -87,7 +89,7 @@ export default function ChatInput({
 
   const handleSubmit = () => {
     const trimmed = value.trim();
-    if (!trimmed) return;
+    if (!trimmed || disabled) return;
     onSubmit(trimmed);
     setValue("");
     if (textareaRef.current) {
@@ -233,12 +235,12 @@ export default function ChatInput({
         />
         <button
           onClick={handleSubmit}
-          disabled={!value.trim()}
+          disabled={!value.trim() || disabled}
           className="flex items-center justify-center w-8 h-8 rounded-lg transition-all shrink-0"
           style={{
-            background: value.trim() ? "#2891DA" : "var(--bg-hover)",
-            color: value.trim() ? "white" : "var(--text-muted)",
-            cursor: value.trim() ? "pointer" : "not-allowed",
+            background: value.trim() && !disabled ? "#2891DA" : "var(--bg-hover)",
+            color: value.trim() && !disabled ? "white" : "var(--text-muted)",
+            cursor: value.trim() && !disabled ? "pointer" : "not-allowed",
           }}
         >
           <ArrowUp size={16} />
