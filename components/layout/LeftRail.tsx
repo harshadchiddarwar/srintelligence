@@ -41,6 +41,13 @@ const GROUP_LABELS: Record<string, string> = {
   older: "Older",
 };
 
+// Group spacing: add extra top margin when transitioning from week → month
+const GROUP_EXTRA_MARGIN: Record<string, string> = {
+  week: "",
+  month: "mt-3",
+  older: "mt-3",
+};
+
 export default function LeftRail({ collapsed = false, narrow = false, onToggleCollapse }: LeftRailProps) {
   const pathname = usePathname();
   const isChat = pathname.startsWith("/chat");
@@ -75,14 +82,16 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
     .map((key) => ({ key, label: GROUP_LABELS[key], items: threads.filter((t) => getGroup(t.date) === key) }))
     .filter((g) => g.items.length > 0);
 
-  // Nav layout: expanded = horizontal row, narrow/collapsed = vertical column
-  const navLayout = collapsed || narrow ? "flex-col items-center gap-0.5" : "flex-row items-center gap-0";
+  // Shared nav item layout: always flex-row, icon + label
+  const navItemClass = `flex items-center rounded-lg transition-colors px-2 py-2 ${
+    collapsed || narrow ? "justify-center" : "gap-2.5"
+  }`;
 
   return (
     <aside style={{ background: "var(--bg-secondary)" }} className="flex flex-col h-full w-full overflow-hidden">
 
       {/* Nav items */}
-      <nav className={`flex pt-3 pb-1 px-2 ${collapsed || narrow ? "flex-col gap-0.5" : "flex-col gap-0.5"}`}>
+      <nav className="flex flex-col pt-3 pb-1 px-2 gap-0.5">
         {navItems.map(({ href, label, icon: Icon }) => {
           const active = pathname.startsWith(href);
           return (
@@ -90,7 +99,7 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
               key={href}
               href={href}
               title={label}
-              className={`flex items-center rounded-lg transition-colors px-2 py-2 ${collapsed || narrow ? "flex-col gap-0.5 justify-center" : "flex-row gap-2.5"}`}
+              className={navItemClass}
               style={active
                 ? { background: "var(--accent-dim)", color: "var(--accent)" }
                 : { color: "var(--text-muted)" }}
@@ -125,11 +134,11 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
             </Link>
           </div>
 
-          {groups.map(({ key, label, items }) => {
+          {groups.map(({ key, label, items }, gi) => {
             const isGroupCollapsed = collapsedGroups.has(key);
             return (
-              <div key={key} className="mb-1">
-                {/* Group header — collapsible, light color */}
+              <div key={key} className={`mb-1 ${gi > 0 ? GROUP_EXTRA_MARGIN[key] : ""}`}>
+                {/* Group header — collapsible */}
                 <button
                   onClick={() => toggleGroup(key)}
                   className="w-full flex items-center gap-1 px-3 py-1 transition-colors hover:bg-black/4"
@@ -219,18 +228,30 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
         </div>
       )}
 
-      {/* Spacer to push collapse button to bottom */}
+      {/* Spacer when no thread list */}
       {(!isChat || collapsed) && <div className="flex-1" />}
 
-      {/* Collapse toggle — pinned to bottom */}
-      <button
-        onClick={onToggleCollapse}
-        className="flex items-center justify-center py-2 mx-2 mb-2 rounded-lg transition-colors hover:bg-black/5"
-        style={{ color: "var(--text-muted)" }}
-        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-      </button>
+      {/* Collapse toggle — same layout as nav items, left-aligned */}
+      <div style={{ borderTop: "1px solid var(--border)" }} className="px-2 py-2">
+        <button
+          onClick={onToggleCollapse}
+          className={navItemClass}
+          style={{ color: "var(--text-muted)", width: "100%" }}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          {!collapsed && (
+            <span style={{
+              fontSize: narrow ? "10px" : "12px",
+              fontWeight: 500,
+              letterSpacing: "0.01em",
+              whiteSpace: "nowrap",
+            }}>
+              {narrow ? "" : "Collapse sidebar"}
+            </span>
+          )}
+        </button>
+      </div>
     </aside>
   );
 }

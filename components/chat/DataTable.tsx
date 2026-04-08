@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Download, Maximize2 } from "lucide-react";
+import { FileSpreadsheet, Maximize2 } from "lucide-react";
 import { TableData } from "@/lib/types";
 import DownloadDialog from "@/components/ui/DownloadDialog";
 import FullscreenOverlay from "@/components/ui/FullscreenOverlay";
@@ -83,7 +83,7 @@ export default function DataTable({ data }: { data: TableData }) {
         style={{ color: "var(--text-muted)" }}
         title="Download CSV"
       >
-        <Download size={12} />
+        <FileSpreadsheet size={12} />
         CSV
       </button>
       <button

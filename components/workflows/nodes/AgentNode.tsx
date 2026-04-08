@@ -2,8 +2,25 @@
 
 import { useState } from "react";
 import { Handle, Position, NodeProps, useReactFlow } from "@xyflow/react";
-import { BarChart3, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, BarChart2, Pencil, Trash2 } from "lucide-react";
-import { LucideIcon } from "lucide-react";
+import { BarChart3, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Pencil, Trash2 } from "lucide-react";
+
+// Custom "square → circle" icon for Causal Inference
+function CausalIcon({ size = 14, style, strokeWidth = 1.5 }: { size?: number; style?: React.CSSProperties; strokeWidth?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={style}
+      stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+      {/* Square (cause) */}
+      <rect x="0.75" y="4" width="5.5" height="5.5" rx="1" strokeWidth={strokeWidth} />
+      {/* Arrow shaft + head */}
+      <path d="M6.5 6.75 H9.5" strokeWidth={strokeWidth} />
+      <path d="M8 5.25 L10 6.75 L8 8.25" strokeWidth={strokeWidth} />
+      {/* Circle (effect) */}
+      <circle cx="12.5" cy="6.75" r="2.75" strokeWidth={strokeWidth} />
+    </svg>
+  );
+}
+
+type IconComponent = React.FC<{ size?: number; style?: React.CSSProperties; strokeWidth?: number }>;
 
 const AGENT_COLORS: Record<string, string> = {
   "cortex-analyst": "#4f8ef7",
@@ -25,7 +42,7 @@ const AGENT_COLORS: Record<string, string> = {
   output: "#64748b",
 };
 
-const AGENT_ICONS: Record<string, LucideIcon> = {
+const AGENT_ICONS: Record<string, IconComponent> = {
   "cortex-analyst": BarChart3,
   clustering: Layers,
   prophet: TrendingUp,
@@ -41,7 +58,7 @@ const AGENT_ICONS: Record<string, LucideIcon> = {
   hierarchical: Layers,
   "auto-cluster": Layers,
   mtree: GitFork,
-  causal: BarChart2,  // waterfall-like icon for causal inference
+  causal: CausalIcon,
   output: FileText,
 };
 
@@ -89,14 +106,14 @@ export default function AgentNode({ id, data, selected }: NodeProps) {
           </div>
         </div>
 
-        {/* Hover: show edit + delete; otherwise nothing */}
+        {/* Hover: edit (bubbles to onNodeClick → opens drawer) + delete */}
         {hovered && (
           <div className="flex items-center gap-0.5 shrink-0 ml-1">
             <button
               className="p-1 rounded hover:bg-black/8 transition-colors"
               style={{ color: "var(--text-muted)" }}
-              title="Edit"
-              onClick={(e) => e.stopPropagation()}
+              title="Configure"
+              /* No stopPropagation — click bubbles to node → onNodeClick opens drawer */
             >
               <Pencil size={11} />
             </button>
@@ -117,7 +134,7 @@ export default function AgentNode({ id, data, selected }: NodeProps) {
         {semanticModel && (
           <span
             className="inline-block text-xs px-1.5 py-0.5 rounded mb-1.5"
-            style={{ background: "var(--bg-secondary)", color: "var(--text-muted)", fontSize: "10px" }}
+            style={{ background: "rgba(40,145,218,0.08)", color: "#2891DA", fontSize: "10px" }}
           >
             {semanticModel}
           </span>

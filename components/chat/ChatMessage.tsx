@@ -5,29 +5,29 @@ import AgentActivityBar from "./AgentActivityBar";
 import DataTable from "./DataTable";
 import InlineChart from "./InlineChart";
 
-// Gradient sparkle avatar — white circle, two sparkle shapes filled with brand gradient
+// Gradient sparkle avatar — white circle, one large + one small sparkle filled with brand gradient
 function AIAvatar() {
   return (
     <div
       className="w-7 h-7 rounded-full shrink-0 mt-0.5 flex items-center justify-center"
       style={{ background: "#ffffff", border: "1.5px solid #E0E0E0", boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}
     >
-      <svg width="17" height="17" viewBox="0 0 17 17" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
         <defs>
-          <linearGradient id="sg" x1="0" y1="0" x2="17" y2="17" gradientUnits="userSpaceOnUse">
+          <linearGradient id="sg2" x1="0" y1="0" x2="16" y2="16" gradientUnits="userSpaceOnUse">
             <stop offset="0%" stopColor="#2891DA" />
             <stop offset="100%" stopColor="#FFA550" />
           </linearGradient>
         </defs>
-        {/* Large sparkle */}
+        {/* Large sparkle — 4-arm star, dominant, centered-left */}
         <path
-          d="M5.5 2L6.6 5.4L9.5 6L6.6 6.6L5.5 10L4.4 6.6L1.5 6L4.4 5.4L5.5 2Z"
-          fill="url(#sg)"
+          d="M6.5 1.5 L7.6 5.4 L11.5 6.5 L7.6 7.6 L6.5 11.5 L5.4 7.6 L1.5 6.5 L5.4 5.4Z"
+          fill="url(#sg2)"
         />
-        {/* Small sparkle */}
+        {/* Small sparkle — compact 4-arm star, upper-right corner */}
         <path
-          d="M12 6.5L12.7 8.8L15 9L12.7 9.2L12 11.5L11.3 9.2L9 9L11.3 8.8L12 6.5Z"
-          fill="url(#sg)"
+          d="M13 4.5 L13.55 6.2 L15 6.5 L13.55 6.8 L13 8.5 L12.45 6.8 L11 6.5 L12.45 6.2Z"
+          fill="url(#sg2)"
         />
       </svg>
     </div>

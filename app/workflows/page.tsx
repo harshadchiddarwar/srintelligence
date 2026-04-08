@@ -4,9 +4,10 @@ import { useState } from "react";
 import Link from "next/link";
 import { Plus, Pin, LayoutGrid, Wrench, X } from "lucide-react";
 import WorkflowCardComponent from "@/components/workflows/WorkflowCard";
-import { workflows } from "@/lib/mock-data";
+import { workflows as initialWorkflows } from "@/lib/mock-data";
+import { WorkflowCard } from "@/lib/types";
 
-function TemplatePickerModal({ onClose }: { onClose: () => void }) {
+function TemplatePickerModal({ workflows, onClose }: { workflows: WorkflowCard[]; onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -59,6 +60,26 @@ function TemplatePickerModal({ onClose }: { onClose: () => void }) {
 
 export default function WorkflowsPage() {
   const [showTemplate, setShowTemplate] = useState(false);
+  const [workflows, setWorkflows] = useState<WorkflowCard[]>(initialWorkflows);
+
+  const handleDuplicate = (id: string) => {
+    const source = workflows.find((w) => w.id === id);
+    if (!source) return;
+    const copy: WorkflowCard = {
+      ...source,
+      id: `${source.id}-copy-${Date.now()}`,
+      name: `${source.name} (Copy)`,
+      lastRun: "—",
+      runCount: 0,
+      status: "success",
+    };
+    setWorkflows((prev) => {
+      const idx = prev.findIndex((w) => w.id === id);
+      const next = [...prev];
+      next.splice(idx + 1, 0, copy);
+      return next;
+    });
+  };
 
   return (
     <div className="flex flex-col h-full overflow-y-auto" style={{ background: "var(--bg-primary)" }}>
@@ -79,7 +100,7 @@ export default function WorkflowsPage() {
         {/* Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {workflows.map((wf) => (
-            <WorkflowCardComponent key={wf.id} workflow={wf} />
+            <WorkflowCardComponent key={wf.id} workflow={wf} onDuplicate={handleDuplicate} />
           ))}
 
           {/* New Workflow card */}
@@ -122,7 +143,7 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
-      {showTemplate && <TemplatePickerModal onClose={() => setShowTemplate(false)} />}
+      {showTemplate && <TemplatePickerModal workflows={workflows} onClose={() => setShowTemplate(false)} />}
     </div>
   );
 }

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Save, Play, Share2, Trash2, ArrowLeft } from "lucide-react";
+import { Save, Play, Share2, Trash2, Pencil, Check } from "lucide-react";
 import WorkflowCanvas from "@/components/workflows/WorkflowCanvas";
 
 type ScheduleType = "daily" | "weekly" | "monthly";
@@ -60,81 +60,53 @@ function InlineSchedulePicker() {
         <span style={{ color: "var(--text-muted)" }}>Schedule:</span>
         <span className="font-medium">{label}</span>
       </button>
-
       {open && (
-        <div
-          className="absolute top-full left-0 mt-1 z-30 rounded-xl shadow-xl p-3 flex flex-col gap-2"
-          style={{ background: "#ffffff", border: "1px solid var(--border)", minWidth: 260 }}
-        >
-          {/* Schedule type */}
+        <div className="absolute top-full left-0 mt-1 z-30 rounded-xl shadow-xl p-3 flex flex-col gap-2"
+          style={{ background: "#ffffff", border: "1px solid var(--border)", minWidth: 260 }}>
           <div className="flex gap-1.5">
             {(["daily", "weekly", "monthly"] as ScheduleType[]).map((s) => (
-              <button
-                key={s}
-                onClick={() => setSchedule(s)}
+              <button key={s} onClick={() => setSchedule(s)}
                 className="px-2.5 py-1 rounded-lg text-xs font-medium capitalize transition-colors"
-                style={{
-                  background: schedule === s ? "#2891DA" : "var(--bg-secondary)",
-                  color: schedule === s ? "white" : "var(--text-secondary)",
-                }}
-              >
+                style={{ background: schedule === s ? "#2891DA" : "var(--bg-secondary)", color: schedule === s ? "white" : "var(--text-secondary)" }}>
                 {s}
               </button>
             ))}
           </div>
-
-          {/* Day of week */}
           {schedule === "weekly" && (
             <div className="flex gap-1 flex-wrap">
               {DAYS.map((d) => (
-                <button key={d} onClick={() => setDay(d)}
-                  className="px-2 py-1 rounded text-xs transition-colors"
-                  style={{
-                    background: day === d ? "#2891DA" : "var(--bg-secondary)",
-                    color: day === d ? "white" : "var(--text-muted)",
-                    border: `1px solid ${day === d ? "#2891DA" : "var(--border)"}`,
-                  }}>
+                <button key={d} onClick={() => setDay(d)} className="px-2 py-1 rounded text-xs transition-colors"
+                  style={{ background: day === d ? "#2891DA" : "var(--bg-secondary)", color: day === d ? "white" : "var(--text-muted)", border: `1px solid ${day === d ? "#2891DA" : "var(--border)"}` }}>
                   {d}
                 </button>
               ))}
             </div>
           )}
-
-          {/* Day of month */}
           {schedule === "monthly" && (
             <div className="flex gap-1 flex-wrap max-h-20 overflow-y-auto">
               {Array.from({ length: 28 }, (_, i) => String(i + 1)).map((d) => (
                 <button key={d} onClick={() => setMonthDate(d)}
                   className="w-6 h-6 rounded text-xs transition-colors flex items-center justify-center"
-                  style={{
-                    background: monthDate === d ? "#2891DA" : "var(--bg-secondary)",
-                    color: monthDate === d ? "white" : "var(--text-muted)",
-                    border: `1px solid ${monthDate === d ? "#2891DA" : "var(--border)"}`,
-                  }}>
+                  style={{ background: monthDate === d ? "#2891DA" : "var(--bg-secondary)", color: monthDate === d ? "white" : "var(--text-muted)", border: `1px solid ${monthDate === d ? "#2891DA" : "var(--border)"}` }}>
                   {d}
                 </button>
               ))}
             </div>
           )}
-
-          {/* Time */}
           <div className="flex items-center gap-1.5 pt-1" style={{ borderTop: "1px solid var(--border)" }}>
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>Time:</span>
-            <select value={hour} onChange={(e) => setHour(e.target.value)}
-              className="rounded px-1.5 py-0.5 text-xs outline-none"
+            <select value={hour} onChange={(e) => setHour(e.target.value)} className="rounded px-1.5 py-0.5 text-xs outline-none"
               style={{ border: "1px solid var(--border)", background: "#fff", color: "var(--text-primary)" }}>
               {HOURS.map((h) => <option key={h} value={h}>{h}</option>)}
             </select>
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>:</span>
-            <select value={minute} onChange={(e) => setMinute(e.target.value)}
-              className="rounded px-1.5 py-0.5 text-xs outline-none"
+            <select value={minute} onChange={(e) => setMinute(e.target.value)} className="rounded px-1.5 py-0.5 text-xs outline-none"
               style={{ border: "1px solid var(--border)", background: "#fff", color: "var(--text-primary)" }}>
               {MINUTES.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
             <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--border)" }}>
               {(["AM", "PM"] as const).map((p) => (
-                <button key={p} onClick={() => setAmpm(p)}
-                  className="px-2 py-0.5 text-xs transition-colors"
+                <button key={p} onClick={() => setAmpm(p)} className="px-2 py-0.5 text-xs transition-colors"
                   style={{ background: ampm === p ? "#2891DA" : "#fff", color: ampm === p ? "white" : "var(--text-muted)" }}>
                   {p}
                 </button>
@@ -156,42 +128,57 @@ export default function WorkflowEditPage() {
   const router = useRouter();
   const [autoUpdate, setAutoUpdate] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
+  const [workflowName, setWorkflowName] = useState("Payer Segmentation Pipeline");
+  const [editingName, setEditingName] = useState(false);
+  const [nameHovered, setNameHovered] = useState(false);
 
   const handleBack = () => {
-    if (isDirty) {
-      const confirmed = window.confirm("You have unsaved changes. Leave without saving?");
-      if (!confirmed) return;
-    }
+    if (isDirty && !window.confirm("You have unsaved changes. Leave without saving?")) return;
     router.push("/workflows");
   };
 
   return (
     <div className="flex flex-col h-full" style={{ background: "#ffffff" }}>
       {/* Settings bar */}
-      <div
-        className="flex items-center gap-3 px-4 py-2.5 shrink-0"
-        style={{ borderBottom: "1px solid var(--border)", background: "#ffffff" }}
-      >
-        {/* Back button */}
-        <button
-          onClick={handleBack}
-          className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-colors hover:bg-black/5"
-          style={{ color: "var(--text-muted)" }}
+      <div className="flex items-center gap-3 px-4 py-2.5 shrink-0"
+        style={{ borderBottom: "1px solid var(--border)", background: "#ffffff" }}>
+
+        {/* Workflow name with hover-to-rename */}
+        <div
+          className="flex items-center gap-1.5"
+          onMouseEnter={() => setNameHovered(true)}
+          onMouseLeave={() => setNameHovered(false)}
         >
-          <ArrowLeft size={13} />
-          <span>Back</span>
-        </button>
-
-        <div style={{ width: 1, height: 28, background: "var(--border)" }} className="shrink-0" />
-
-        <div className="flex flex-col justify-center mr-2">
-          <input
-            defaultValue="Payer Segmentation Pipeline"
-            onChange={() => setIsDirty(true)}
-            className="bg-transparent text-sm font-semibold outline-none border-b border-transparent focus:border-black/20 transition-colors pb-0.5 leading-tight"
-            style={{ color: "var(--text-primary)", minWidth: 220 }}
-          />
-          <span className="text-xs" style={{ color: "var(--text-muted)" }}>v3</span>
+          {editingName ? (
+            <>
+              <input
+                autoFocus
+                value={workflowName}
+                onChange={(e) => { setWorkflowName(e.target.value); setIsDirty(true); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") setEditingName(false); }}
+                onBlur={() => setEditingName(false)}
+                className="bg-transparent text-sm font-semibold outline-none pb-0.5"
+                style={{ color: "var(--text-primary)", minWidth: 200, borderBottom: "1px solid rgba(0,0,0,0.2)" }}
+              />
+              <button onClick={() => setEditingName(false)} className="p-0.5 rounded" style={{ color: "var(--accent)" }}>
+                <Check size={12} />
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="flex flex-col">
+                <span className="text-sm font-semibold leading-tight" style={{ color: "var(--text-primary)" }}>{workflowName}</span>
+                <span className="text-xs" style={{ color: "var(--text-muted)" }}>v3</span>
+              </div>
+              {nameHovered && (
+                <button onClick={() => setEditingName(true)}
+                  className="p-0.5 rounded hover:bg-black/5 transition-colors self-start mt-0.5"
+                  style={{ color: "var(--text-muted)" }}>
+                  <Pencil size={11} />
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         <div style={{ width: 1, height: 28, background: "var(--border)" }} className="shrink-0" />
@@ -199,16 +186,19 @@ export default function WorkflowEditPage() {
         <ToggleSwitch
           enabled={autoUpdate}
           onChange={setAutoUpdate}
-          labelOff="Manual"
-          labelOn="Auto-update"
+          labelOff="Manual-Update"
+          labelOn="Auto-Update"
         />
-
-        {/* Schedule picker — only when auto-update */}
         {autoUpdate && <InlineSchedulePicker />}
 
         <div className="flex-1" />
 
         <div className="flex items-center gap-2">
+          <button onClick={handleBack}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/5"
+            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}>
+            Back
+          </button>
           <Link
             href="/workflows/wf-2/run"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-90"
@@ -217,25 +207,21 @@ export default function WorkflowEditPage() {
             <Play size={11} fill="white" />
             Run
           </Link>
-          <button
-            onClick={() => setIsDirty(false)}
+          <button onClick={() => setIsDirty(false)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/5"
-            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}
-          >
+            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}>
             <Save size={11} />
             Save
           </button>
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/7"
-            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}
-          >
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/5"
+            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}>
             <Share2 size={11} />
             Share
           </button>
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/7"
-            style={{ color: "var(--danger)", border: "1px solid var(--border)" }}
-          >
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:bg-black/5"
+            style={{ color: "var(--danger)", border: "1px solid var(--border)" }}>
             <Trash2 size={11} />
             Delete
           </button>
