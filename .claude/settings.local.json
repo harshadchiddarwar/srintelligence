@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(npm install:*)",
+      "Bash(mkdir -p /c/Users/harshad.chiddarwar/Documents/srintelligence/app/workflows/[id])",
+      "Bash(mkdir -p \"/c/Users/harshad.chiddarwar/Documents/srintelligence/app/workflows/[id]/edit\")",
+      "Bash(mkdir -p \"/c/Users/harshad.chiddarwar/Documents/srintelligence/app/workflows/[id]/run\")",
+      "Bash(npm run:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npx tsc:*)",
+      "Bash(node -e ':*)",
+      "Bash(xargs grep:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.snowflake.com)"
+    ]
+  }
+}

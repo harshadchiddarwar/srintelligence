@@ -144,7 +144,7 @@ export default function ThreadPage() {
           : data.content,
         agentActivity: {
           masterAgent: "Master Agent",
-          routedTo: "Cortex Analyst · CORTEX_TESTCASE",
+          routedTo: "SRI Analytics Engine",
           latency: data.latency,
         },
         tableData: data.tableData ?? undefined,
@@ -192,7 +192,7 @@ export default function ThreadPage() {
               Ask anything about your Snowflake data
             </p>
             <p className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
-              Powered by Cortex Analyst · CORTEX_TESTCASE
+              Powered by SRIntelligence™ Analytics
             </p>
           </div>
         )}
@@ -238,7 +238,7 @@ export default function ThreadPage() {
               ))}
             </div>
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Querying Cortex Analyst…
+              Analyzing…
             </span>
           </div>
         )}

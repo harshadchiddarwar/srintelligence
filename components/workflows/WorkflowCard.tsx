@@ -2,35 +2,42 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Play, Edit2, Share2, Calendar, RefreshCw, BarChart3, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Zap, Copy, Check } from "lucide-react";
+import { Play, Edit2, Share2, Calendar, RefreshCw, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Zap, Copy, Check } from "lucide-react";
 import { LucideIcon } from "lucide-react";
 import { WorkflowCard as WorkflowCardType } from "@/lib/types";
 
 const AGENT_ICONS: Record<string, LucideIcon> = {
-  "cortex-analyst": BarChart3,
-  clustering: Layers,
-  prophet: TrendingUp,
-  sarima: Activity,
-  xgboost: Cpu,
-  mtree: GitFork,
-  output: FileText,
+  "sri-forecast":   TrendingUp,
+  "sri-clustering": Layers,
+  "sri-mtree":      GitFork,
+  "sri-causal":     GitFork,
+  // sub-types
+  prophet:          TrendingUp,
+  sarima:           Activity,
+  xgboost:          Cpu,
+  gmm:              Layers,
+  kmeans:           Layers,
+  output:           FileText,
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  "cortex-analyst": "#4f8ef7",
-  clustering: "#a78bfa",
-  prophet: "#34c98b",
-  sarima: "#34c98b",
-  xgboost: "#f5a623",
-  mtree: "#fb923c",
-  output: "#64748b",
+  "sri-forecast":   "#34c98b",
+  "sri-clustering": "#a78bfa",
+  "sri-mtree":      "#fb923c",
+  "sri-causal":     "#8b5cf6",
+  prophet:          "#34c98b",
+  sarima:           "#34c98b",
+  xgboost:          "#f5a623",
+  gmm:              "#a78bfa",
+  kmeans:           "#a78bfa",
+  output:           "#64748b",
 };
 
 function ChainBadge({ chain }: { chain: WorkflowCardType["agentChain"] }) {
   return (
     <div className="flex items-center gap-1.5">
       {chain.map((step, i) => {
-        const Icon = AGENT_ICONS[step.type] ?? BarChart3;
+        const Icon = AGENT_ICONS[step.type] ?? TrendingUp;
         return (
           <span key={step.id} className="flex items-center gap-1.5">
             <span

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Save, Play, Share2, BarChart3, TrendingUp, Layers, GitFork, ChevronDown, ChevronRight, X, Undo2, Redo2, Pencil, Check, Trash2, Activity } from "lucide-react";
+import { Save, Play, Share2, TrendingUp, Layers, GitFork, ChevronDown, ChevronRight, X, Undo2, Redo2, Pencil, Check, Trash2, Activity } from "lucide-react";
 import {
   ReactFlow,
   Background,
@@ -164,31 +164,34 @@ function InlineSchedulePicker() {
   );
 }
 
-// Agent palette with full algorithm lists
+// Agent palette — only the 4 SRI ML agents from CORTEX_TESTING.ML
 const AGENT_GROUPS = [
-  { type: "cortex-analyst", label: "Analyst", icon: BarChart3, color: "#4f8ef7", description: "SQL queries against Snowflake", algorithms: null },
-  { type: "forecasting", label: "Forecasting", icon: TrendingUp, color: "#34c98b", description: "Time-series forecasting",
+  {
+    type: "sri-forecast", label: "Forecast", icon: TrendingUp, color: "#34c98b",
+    description: "Time-series demand forecasting",
     algorithms: [
-      { type: "prophet", label: "Prophet" },
-      { type: "sarima", label: "SARIMA" },
-      { type: "holt-winters", label: "Holt-Winters" },
-      { type: "xgboost", label: "XGBoost" },
-      { type: "hybrid", label: "Hybrid" },
-      { type: "auto-forecast", label: "Auto (best fit)" },
+      { type: "prophet",        label: "Prophet" },
+      { type: "sarima",         label: "SARIMA" },
+      { type: "holt-winters",   label: "Holt-Winters" },
+      { type: "xgboost",        label: "XGBoost" },
+      { type: "hybrid",         label: "Hybrid (Prophet + XGBoost)" },
+      { type: "auto-forecast",  label: "Auto (best fit)" },
     ],
   },
-  { type: "clustering", label: "Clustering", icon: Layers, color: "#a78bfa", description: "Unsupervised segmentation",
+  {
+    type: "sri-clustering", label: "Clustering", icon: Layers, color: "#a78bfa",
+    description: "Unsupervised segmentation",
     algorithms: [
-      { type: "gmm", label: "GMM" },
-      { type: "kmeans", label: "K-Means" },
-      { type: "kmedoids", label: "K-Medoids" },
-      { type: "dbscan", label: "DBScan" },
+      { type: "kmeans",       label: "K-Means" },
       { type: "hierarchical", label: "Hierarchical" },
+      { type: "dbscan",       label: "DBSCAN" },
+      { type: "kmedoids",     label: "K-Medoids" },
+      { type: "gmm",          label: "GMM" },
       { type: "auto-cluster", label: "Auto (best fit)" },
     ],
   },
-  { type: "mtree", label: "Decision Tree", icon: GitFork, color: "#fb923c", description: "Driver analysis & explainability", algorithms: null },
-  { type: "causal", label: "Causal Inference", icon: CausalIcon, color: "#8b5cf6", description: "Causal effect estimation", algorithms: null },
+  { type: "sri-mtree",  label: "mTree™",           icon: GitFork,   color: "#fb923c", description: "Driver analysis & waterfall explainability", algorithms: null },
+  { type: "sri-causal", label: "Causal Inference",  icon: CausalIcon, color: "#8b5cf6", description: "4-phase causal discovery pipeline", algorithms: null },
 ];
 
 // Topological step-number computation
@@ -227,7 +230,7 @@ interface NodeDetailDrawerProps {
 function NodeDetailDrawer({ node, onClose, onUpdateNode }: NodeDetailDrawerProps) {
   const d = node.data as Record<string, unknown>;
   const [prompt, setPrompt] = useState((d.prompt as string) ?? "");
-  const [agentType, setAgentType] = useState((d.agentType as string) ?? "cortex-analyst");
+  const [agentType, setAgentType] = useState((d.agentType as string) ?? "sri-forecast");
   const [outputFormat, setOutputFormat] = useState((d.outputFormat as string) ?? "Full Table");
   const [semanticModelId, setSemanticModelId] = useState((d.semanticModel as string) ?? semanticModels[0].name);
 

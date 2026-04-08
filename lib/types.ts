@@ -65,12 +65,24 @@ export interface AgentStep {
 }
 
 export type AgentType =
-  | "cortex-analyst"
-  | "clustering"
+  | "sri-forecast"
+  | "sri-clustering"
+  | "sri-mtree"
+  | "sri-causal"
+  // forecast sub-types
   | "prophet"
   | "sarima"
+  | "holt-winters"
   | "xgboost"
-  | "mtree"
+  | "hybrid"
+  | "auto-forecast"
+  // clustering sub-types
+  | "gmm"
+  | "kmeans"
+  | "kmedoids"
+  | "dbscan"
+  | "hierarchical"
+  | "auto-cluster"
   | "output";
 
 export interface WorkflowRun {

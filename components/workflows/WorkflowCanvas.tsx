@@ -31,20 +31,10 @@ export const edgeDefaults = {
 };
 
 const DEFAULT_NODES: Node[] = [
-  { id: "step-1", type: "agentNode", position: { x: 180, y: 40 }, data: { agentType: "cortex-analyst", label: "Cortex Analyst", stepNumber: 1, prompt: "Show dispensed claims, fill rate, and avg OOP by national plan for last 13 weeks" } },
-  { id: "step-2", type: "agentNode", position: { x: 180, y: 220 }, data: { agentType: "clustering", label: "GMM Clustering", stepNumber: 2, prompt: "Features: auto-detect. Segments: auto-detect." } },
-  { id: "step-3a", type: "agentNode", position: { x: 40, y: 400 }, data: { agentType: "prophet", label: "Prophet Forecast", stepNumber: 3, prompt: "Segment A — 13-week horizon", runPerSegment: true } },
-  { id: "step-3b", type: "agentNode", position: { x: 320, y: 400 }, data: { agentType: "prophet", label: "Prophet Forecast", stepNumber: 4, prompt: "Segment B — 13-week horizon", runPerSegment: true } },
-  { id: "output", type: "outputNode", position: { x: 180, y: 580 }, data: {} },
+  { id: "output", type: "outputNode", position: { x: 180, y: 160 }, data: {} },
 ];
 
-const DEFAULT_EDGES: Edge[] = [
-  { id: "e1-2", source: "step-1", target: "step-2", ...edgeDefaults },
-  { id: "e2-3a", source: "step-2", target: "step-3a", ...edgeDefaults },
-  { id: "e2-3b", source: "step-2", target: "step-3b", ...edgeDefaults },
-  { id: "e3a-out", source: "step-3a", target: "output", ...edgeDefaults },
-  { id: "e3b-out", source: "step-3b", target: "output", ...edgeDefaults },
-];
+const DEFAULT_EDGES: Edge[] = [];
 
 // Compute step numbers via topological BFS
 function computeStepNumbers(nodes: Node[], edges: Edge[]): Map<string, number> {
@@ -87,7 +77,7 @@ interface NodeDetailDrawerProps {
 function NodeDetailDrawer({ node, onClose, onUpdateNode }: NodeDetailDrawerProps) {
   const d = node.data as Record<string, unknown>;
   const [prompt, setPrompt] = useState((d.prompt as string) ?? "");
-  const [agentType, setAgentType] = useState((d.agentType as string) ?? "cortex-analyst");
+  const [agentType, setAgentType] = useState((d.agentType as string) ?? "sri-forecast");
   const [outputFormat, setOutputFormat] = useState((d.outputFormat as string) ?? "Full Table");
   const [semanticModelId, setSemanticModelId] = useState((d.semanticModel as string) ?? semanticModels[0].name);
 

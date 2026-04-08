@@ -48,7 +48,7 @@ export default function ChatHome() {
             What would you like to analyze?
           </p>
           <p className="text-xs mt-1" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
-            Powered by Cortex Analyst · CORTEX_TESTCASE
+            Powered by SRIntelligence™ Analytics
           </p>
         </div>
 

@@ -31,9 +31,8 @@ export default function AgentActivityBar({ activity }: { activity: AgentActivity
           className="px-3 py-2 text-xs"
           style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border)" }}
         >
-          <p>Semantic model: DataExplore</p>
-          <p>SQL generated: ✅ 1 query executed</p>
-          <p>Rows returned: 4 • Latency: {activity.latency}</p>
+          <p>Agent: {activity.routedTo}</p>
+          <p>Latency: {activity.latency}</p>
         </div>
       )}
     </div>

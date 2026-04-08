@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Handle, Position, NodeProps, useReactFlow } from "@xyflow/react";
-import { BarChart3, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Pencil, Trash2 } from "lucide-react";
+import { Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Pencil, Trash2 } from "lucide-react";
 
 // Custom "square → circle" icon for Causal Inference
 function CausalIcon({ size = 14, style, strokeWidth = 1.5 }: { size?: number; style?: React.CSSProperties; strokeWidth?: number }) {
@@ -23,57 +23,63 @@ function CausalIcon({ size = 14, style, strokeWidth = 1.5 }: { size?: number; st
 type IconComponent = React.FC<{ size?: number; style?: React.CSSProperties; strokeWidth?: number }>;
 
 const AGENT_COLORS: Record<string, string> = {
-  "cortex-analyst": "#4f8ef7",
-  clustering: "#a78bfa",
-  prophet: "#34c98b",
-  sarima: "#34c98b",
-  "holt-winters": "#34c98b",
-  xgboost: "#f5a623",
-  hybrid: "#34c98b",
-  "auto-forecast": "#2891DA",
-  gmm: "#a78bfa",
-  kmeans: "#a78bfa",
-  kmedoids: "#a78bfa",
-  dbscan: "#a78bfa",
-  hierarchical: "#a78bfa",
-  "auto-cluster": "#2891DA",
-  mtree: "#fb923c",
-  causal: "#8b5cf6",
-  output: "#64748b",
+  // SRI ML agents
+  "sri-forecast":   "#34c98b",
+  "sri-clustering": "#a78bfa",
+  "sri-mtree":      "#fb923c",
+  "sri-causal":     "#8b5cf6",
+  // Forecast sub-types
+  prophet:          "#34c98b",
+  sarima:           "#34c98b",
+  "holt-winters":   "#34c98b",
+  xgboost:          "#f5a623",
+  hybrid:           "#34c98b",
+  "auto-forecast":  "#2891DA",
+  // Clustering sub-types
+  gmm:              "#a78bfa",
+  kmeans:           "#a78bfa",
+  kmedoids:         "#a78bfa",
+  dbscan:           "#a78bfa",
+  hierarchical:     "#a78bfa",
+  "auto-cluster":   "#2891DA",
+  output:           "#64748b",
 };
 
 const AGENT_ICONS: Record<string, IconComponent> = {
-  "cortex-analyst": BarChart3,
-  clustering: Layers,
-  prophet: TrendingUp,
-  sarima: Activity,
-  "holt-winters": TrendingUp,
-  xgboost: Cpu,
-  hybrid: TrendingUp,
-  "auto-forecast": TrendingUp,
-  gmm: Layers,
-  kmeans: Layers,
-  kmedoids: Layers,
-  dbscan: Layers,
-  hierarchical: Layers,
-  "auto-cluster": Layers,
-  mtree: GitFork,
-  causal: CausalIcon,
-  output: FileText,
+  // SRI ML agents
+  "sri-forecast":   TrendingUp,
+  "sri-clustering": Layers,
+  "sri-mtree":      GitFork,
+  "sri-causal":     CausalIcon,
+  // Forecast sub-types
+  prophet:          TrendingUp,
+  sarima:           Activity,
+  "holt-winters":   TrendingUp,
+  xgboost:          Cpu,
+  hybrid:           TrendingUp,
+  "auto-forecast":  TrendingUp,
+  // Clustering sub-types
+  gmm:              Layers,
+  kmeans:           Layers,
+  kmedoids:         Layers,
+  dbscan:           Layers,
+  hierarchical:     Layers,
+  "auto-cluster":   Layers,
+  output:           FileText,
 };
 
 export default function AgentNode({ id, data, selected }: NodeProps) {
   const { deleteElements } = useReactFlow();
   const [hovered, setHovered] = useState(false);
 
-  const agentType = (data.agentType as string) ?? "cortex-analyst";
+  const agentType = (data.agentType as string) ?? "sri-forecast";
   const color = AGENT_COLORS[agentType] ?? "#4f8ef7";
   const label = (data.label as string) ?? "Agent";
   const prompt = (data.prompt as string) ?? "";
   const stepNumber = (data.stepNumber as string | number) ?? 1;
   const runPerSegment = (data.runPerSegment as boolean) ?? false;
   const semanticModel = (data.semanticModel as string) ?? "";
-  const AgentIcon = AGENT_ICONS[agentType] ?? BarChart3;
+  const AgentIcon = AGENT_ICONS[agentType] ?? TrendingUp;
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
