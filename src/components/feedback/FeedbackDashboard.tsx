@@ -47,7 +47,7 @@ export default function FeedbackDashboard() {
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-xl p-4" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="flex items-center gap-2 mb-1">
-            <Star size={14} style={{ color: "#f59e0b" }} />
+            <Star size={14} style={{ color: "#111111" }} />
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>Avg Rating</span>
           </div>
           <p className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>{rating.toFixed(1)}</p>
@@ -65,7 +65,7 @@ export default function FeedbackDashboard() {
 
         <div className="rounded-xl p-4" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="flex items-center gap-2 mb-1">
-            {rating >= 3.5 ? <ThumbsUp size={14} style={{ color: "var(--success)" }} /> : <ThumbsDown size={14} style={{ color: "#ef4444" }} />}
+            {rating >= 3.5 ? <ThumbsUp size={14} style={{ color: "#111111" }} /> : <ThumbsDown size={14} style={{ color: "#111111" }} />}
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>Sentiment</span>
           </div>
           <p className="text-lg font-bold" style={{ color: rating >= 3.5 ? "var(--success)" : "#ef4444" }}>

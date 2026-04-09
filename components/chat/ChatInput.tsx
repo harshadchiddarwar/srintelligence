@@ -379,7 +379,7 @@ export default function ChatInput({
                   className="flex items-center justify-center w-6 h-6 rounded shrink-0"
                   style={{ background: "var(--bg-tertiary)" }}
                 >
-                  <agent.icon size={13} style={{ color: agent.color }} strokeWidth={1.5} />
+                  <agent.icon size={13} style={{ color: "#111111" }} strokeWidth={1.5} />
                 </span>
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold truncate" style={{ color: "var(--text-primary)" }}>{agent.label}</p>
@@ -411,7 +411,7 @@ export default function ChatInput({
                   onClick={() => selectAgentModel(agentIdx, i)}
                 >
                   {model.id === "auto" ? (
-                    <Star size={12} style={{ color: "#FFA550", flexShrink: 0 }} />
+                    <Star size={12} style={{ color: "#111111", flexShrink: 0 }} />
                   ) : (
                     <span style={{ width: 12, flexShrink: 0 }} />
                   )}
@@ -451,7 +451,7 @@ export default function ChatInput({
               onMouseEnter={() => setSlashTwoIdx(i)}
               onClick={() => selectSemanticView(v.id, v.displayName)}
             >
-              <Database size={13} style={{ color: "#2891DA", flexShrink: 0 }} />
+              <Database size={13} style={{ color: "#111111", flexShrink: 0 }} />
               <div>
                 <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>{v.displayName}</p>
                 <p style={{ fontSize: "10px", color: "var(--text-muted)" }}>{v.description}</p>
@@ -498,13 +498,13 @@ export default function ChatInput({
                     className="w-full flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-black/5"
                     style={{ borderBottom: "1px solid var(--border)" }}
                   >
-                    <Database size={12} style={{ color: "#2891DA", flexShrink: 0 }} />
+                    <Database size={12} style={{ color: "#111111", flexShrink: 0 }} />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-medium truncate" style={{ color: "var(--text-primary)" }}>{v.displayName}</p>
                       <p className="truncate" style={{ color: "var(--text-muted)", fontSize: "10px" }}>{v.description}</p>
                     </div>
                     {selectedViewId === v.id && (
-                      <span className="ml-auto text-xs shrink-0" style={{ color: "#2891DA" }}>✓</span>
+                      <span className="ml-auto text-xs shrink-0" style={{ color: "#111111" }}>✓</span>
                     )}
                   </button>
                 ))}

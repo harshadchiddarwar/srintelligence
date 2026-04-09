@@ -68,7 +68,7 @@ export default function SQLArtifact({ artifact }: Props) {
             className="flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-700 transition-colors"
             title={copied ? 'Copied!' : 'Copy SQL'}
           >
-            {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+            {copied ? <Check size={12} /> : <Copy size={12} />}
             <span>{copied ? 'Copied' : 'Copy'}</span>
           </button>
 

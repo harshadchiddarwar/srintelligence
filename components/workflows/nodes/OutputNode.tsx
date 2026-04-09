@@ -19,7 +19,7 @@ export default function OutputNode({ selected }: NodeProps) {
         style={{ background: "rgba(100,116,139,0.12)", borderBottom: "1px solid var(--border)" }}
       >
         <div className="flex items-center gap-1.5">
-          <FileText size={13} style={{ color: "#64748b" }} strokeWidth={1.5} />
+          <FileText size={13} style={{ color: "#111111" }} strokeWidth={1.5} />
           <div>
             <p className="text-xs font-semibold leading-tight" style={{ color: "#64748b" }}>
               OUTPUT

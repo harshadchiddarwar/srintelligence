@@ -472,7 +472,7 @@ export default function ThreadPage() {
             className="flex items-start gap-3 px-4 py-3 rounded-xl"
             style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)" }}
           >
-            <AlertCircle size={16} className="shrink-0" style={{ color: "#ef4444", marginTop: 1 }} />
+            <AlertCircle size={16} className="shrink-0" style={{ color: "#111111", marginTop: 1 }} />
             <div>
               <p className="text-xs font-semibold mb-0.5" style={{ color: "#ef4444" }}>Request failed</p>
               <p className="text-xs" style={{ color: "var(--text-secondary)" }}>{error}</p>

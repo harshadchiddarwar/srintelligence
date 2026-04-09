@@ -89,7 +89,7 @@ export default function AgentNode({ id, data, selected }: NodeProps) {
         style={{ background: `${color}15`, borderBottom: "1px solid var(--border)" }}
       >
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
-          <AgentIcon size={13} style={{ color, flexShrink: 0 }} strokeWidth={1.5} />
+          <AgentIcon size={13} style={{ color: "#111111", flexShrink: 0 }} strokeWidth={1.5} />
           <div className="min-w-0">
             <p className="text-xs font-semibold leading-tight" style={{ color }}>STEP {stepNumber}</p>
             <p className="text-xs font-medium leading-tight truncate" style={{ color: "#1C1A16" }}>{label}</p>

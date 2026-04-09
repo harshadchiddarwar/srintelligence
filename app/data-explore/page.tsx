@@ -257,7 +257,7 @@ export default function DataExplorePage() {
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
               style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
             >
-              <Database size={12} style={{ color: "#2891DA" }} />
+              <Database size={12} style={{ color: "#111111" }} />
               {activeView?.displayName ?? "Analytics"}
               <span className="text-xs ml-1" style={{ color: "var(--text-muted)" }}>
                 {activeView?.fullyQualifiedName ?? ""}

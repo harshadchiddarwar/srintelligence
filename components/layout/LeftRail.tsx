@@ -148,8 +148,8 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
                     {narrow ? label.charAt(0) : label}
                   </span>
                   {isGroupCollapsed
-                    ? <ChevronRight size={10} style={{ color: "#A0A0A0" }} />
-                    : <ChevronDown size={10} style={{ color: "#A0A0A0" }} />}
+                    ? <ChevronRight size={10} style={{ color: "#111111" }} />
+                    : <ChevronDown size={10} style={{ color: "#111111" }} />}
                 </button>
 
                 {!isGroupCollapsed && items.map((t) => (

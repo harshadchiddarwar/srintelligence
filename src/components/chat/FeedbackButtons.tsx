@@ -75,8 +75,8 @@ export default function FeedbackButtons({ lineageId, executionId, stepId, agentN
         onClick={() => openModal('positive')}
         className={`rounded p-1 transition-colors ${
           rating === 'positive'
-            ? 'text-green-600 bg-green-50'
-            : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+            ? 'text-gray-900 bg-gray-100'
+            : 'text-gray-400 hover:text-gray-800 hover:bg-gray-100'
         }`}
         title="Helpful"
         aria-label="Mark as helpful"
@@ -89,8 +89,8 @@ export default function FeedbackButtons({ lineageId, executionId, stepId, agentN
         onClick={() => openModal('negative')}
         className={`rounded p-1 transition-colors ${
           rating === 'negative'
-            ? 'text-red-500 bg-red-50'
-            : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+            ? 'text-gray-900 bg-gray-100'
+            : 'text-gray-400 hover:text-gray-800 hover:bg-gray-100'
         }`}
         title="Not helpful"
         aria-label="Mark as not helpful"

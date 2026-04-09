@@ -297,7 +297,7 @@ function AgentPalette({ onAdd }: { onAdd: (type: string, label: string) => void 
                 style={{ border: "1px solid var(--border)" }}
               >
                 <span className="flex items-center justify-center w-7 h-7 rounded-lg shrink-0" style={{ background: `${agent.color}15` }}>
-                  <Icon size={14} style={{ color: agent.color }} strokeWidth={1.5} />
+                  <Icon size={14} style={{ color: "#111111" }} strokeWidth={1.5} />
                 </span>
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>{agent.label}</p>

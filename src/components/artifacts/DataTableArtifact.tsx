@@ -79,8 +79,8 @@ export default function DataTableArtifact({ artifact }: Props) {
 
   const SortIcon = ({ col }: { col: string }) => {
     if (sortCol !== col) return <ChevronsUpDown className="inline ml-1 opacity-30" size={12} />
-    if (sortDir === 'asc') return <ChevronUp className="inline ml-1 text-indigo-500" size={12} />
-    if (sortDir === 'desc') return <ChevronDown className="inline ml-1 text-indigo-500" size={12} />
+    if (sortDir === 'asc') return <ChevronUp className="inline ml-1" size={12} />
+    if (sortDir === 'desc') return <ChevronDown className="inline ml-1" size={12} />
     return <ChevronsUpDown className="inline ml-1 opacity-30" size={12} />
   }
 
