@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, KeyboardEvent } from "react";
-import { ArrowUp, ChevronDown, ChevronRight, Database, StopCircle, Star, TrendingUp, Layers, GitFork, BarChart2, Zap } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronRight, Database, StopCircle, Star, TrendingUp, Layers, GitFork, BarChart2, GitPullRequestArrow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ const AGENT_OPTIONS: AgentOption[] = [
   {
     id: "causal",
     label: "Causal Inference",
-    icon: Zap,
+    icon: GitPullRequestArrow,
     color: "#8b5cf6",
     description: "4-phase causal discovery & DML",
     tag: "@Causal",

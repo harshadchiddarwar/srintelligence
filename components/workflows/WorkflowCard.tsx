@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Play, Edit2, Share2, Calendar, RefreshCw, Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Zap, Copy, Check } from "lucide-react";
+import { Play, Edit2, Share2, Calendar, RefreshCw, Layers, TrendingUp, Activity, Cpu, GitFork, GitPullRequestArrow, FileText, Zap, Copy, Check } from "lucide-react";
 import { LucideIcon } from "lucide-react";
 import { WorkflowCard as WorkflowCardType } from "@/lib/types";
 
@@ -10,7 +10,7 @@ const AGENT_ICONS: Record<string, LucideIcon> = {
   "sri-forecast":   TrendingUp,
   "sri-clustering": Layers,
   "sri-mtree":      GitFork,
-  "sri-causal":     GitFork,
+  "sri-causal":     GitPullRequestArrow,
   // sub-types
   prophet:          TrendingUp,
   sarima:           Activity,

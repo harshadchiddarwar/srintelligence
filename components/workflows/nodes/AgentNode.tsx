@@ -2,23 +2,7 @@
 
 import { useState } from "react";
 import { Handle, Position, NodeProps, useReactFlow } from "@xyflow/react";
-import { Layers, TrendingUp, Activity, Cpu, GitFork, FileText, Pencil, Trash2 } from "lucide-react";
-
-// Custom "square → circle" icon for Causal Inference
-function CausalIcon({ size = 14, style, strokeWidth = 1.5 }: { size?: number; style?: React.CSSProperties; strokeWidth?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={style}
-      stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-      {/* Square (cause) */}
-      <rect x="0.75" y="4" width="5.5" height="5.5" rx="1" strokeWidth={strokeWidth} />
-      {/* Arrow shaft + head */}
-      <path d="M6.5 6.75 H9.5" strokeWidth={strokeWidth} />
-      <path d="M8 5.25 L10 6.75 L8 8.25" strokeWidth={strokeWidth} />
-      {/* Circle (effect) */}
-      <circle cx="12.5" cy="6.75" r="2.75" strokeWidth={strokeWidth} />
-    </svg>
-  );
-}
+import { Layers, TrendingUp, Activity, Cpu, GitFork, GitPullRequestArrow, FileText, Pencil, Trash2 } from "lucide-react";
 
 type IconComponent = React.FC<{ size?: number; style?: React.CSSProperties; strokeWidth?: number }>;
 
@@ -50,7 +34,7 @@ const AGENT_ICONS: Record<string, IconComponent> = {
   "sri-forecast":   TrendingUp,
   "sri-clustering": Layers,
   "sri-mtree":      GitFork,
-  "sri-causal":     CausalIcon,
+  "sri-causal":     GitPullRequestArrow,
   // Forecast sub-types
   prophet:          TrendingUp,
   sarima:           Activity,

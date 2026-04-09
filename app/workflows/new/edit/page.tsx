@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Save, Play, Share2, TrendingUp, Layers, GitFork, ChevronDown, ChevronRight, X, Undo2, Redo2, Pencil, Check, Trash2, Activity } from "lucide-react";
+import { Save, Play, Share2, TrendingUp, Layers, GitFork, GitPullRequestArrow, ChevronDown, ChevronRight, X, Undo2, Redo2, Pencil, Check, Trash2, Activity } from "lucide-react";
 import {
   ReactFlow,
   Background,
@@ -30,19 +30,6 @@ const edgeDefaults = {
   style: { stroke: "#1C1A16", strokeWidth: 1.5 },
   markerEnd: { type: MarkerType.ArrowClosed, color: "#1C1A16", width: 16, height: 16 },
 };
-
-// Custom causal icon (square → circle)
-function CausalIcon({ size = 14, style, strokeWidth = 1.5 }: { size?: number; style?: React.CSSProperties; strokeWidth?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={style}
-      stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="0.75" y="4" width="5.5" height="5.5" rx="1" strokeWidth={strokeWidth} />
-      <path d="M6.5 6.75 H9.5" strokeWidth={strokeWidth} />
-      <path d="M8 5.25 L10 6.75 L8 8.25" strokeWidth={strokeWidth} />
-      <circle cx="12.5" cy="6.75" r="2.75" strokeWidth={strokeWidth} />
-    </svg>
-  );
-}
 
 type ScheduleType = "daily" | "weekly" | "monthly";
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -191,7 +178,7 @@ const AGENT_GROUPS = [
     ],
   },
   { type: "sri-mtree",  label: "mTree™",           icon: GitFork,   color: "#fb923c", description: "Driver analysis & waterfall explainability", algorithms: null },
-  { type: "sri-causal", label: "Causal Inference",  icon: CausalIcon, color: "#8b5cf6", description: "4-phase causal discovery pipeline", algorithms: null },
+  { type: "sri-causal", label: "Causal Inference",  icon: GitPullRequestArrow, color: "#8b5cf6", description: "4-phase causal discovery pipeline", algorithms: null },
 ];
 
 // Topological step-number computation
