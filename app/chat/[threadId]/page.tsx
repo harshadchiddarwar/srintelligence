@@ -348,6 +348,7 @@ export default function ThreadPage() {
               finalResponse = ("result" in p && p.result) ? p.result : (p as FormattedResponse);
               break;
             }
+            case "AGENT_ERROR":
             case "ERROR":
               throw new Error(event.error ?? "Unknown agent error");
           }
