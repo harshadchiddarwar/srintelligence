@@ -373,10 +373,42 @@ function extractSqlFromEvent(
     }
   }
 
-  // Anthropic tool result block
+  // Anthropic tool result / tool_use blocks
   if (event['type'] === 'tool_result' || event['type'] === 'tool_use') {
     const input = event['input'] as Record<string, unknown> | undefined;
     if (input && typeof input['sql'] === 'string') return input['sql'];
+    if (input && typeof input['query'] === 'string') return input['query'];
+  }
+
+  // Anthropic content_block_start with tool_use (the Cortex Analyst tool call)
+  if (event['type'] === 'content_block_start') {
+    const cb = event['content_block'] as Record<string, unknown> | undefined;
+    if (cb?.['type'] === 'tool_use') {
+      const input = cb['input'] as Record<string, unknown> | undefined;
+      if (typeof input?.['sql'] === 'string') return input['sql'];
+      if (typeof input?.['query'] === 'string') return input['query'];
+    }
+  }
+
+  // Snowflake message_delta carrying tool result content
+  if (event['type'] === 'message_delta') {
+    const content = event['content'] as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block['type'] === 'tool_result') {
+          const c = block['content'] as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(c)) {
+            for (const b of c) {
+              if (b['type'] === 'sql' && typeof b['statement'] === 'string') return b['statement'];
+              if (b['type'] === 'text' && typeof b['text'] === 'string') {
+                const sql = extractSqlFromText(b['text']);
+                if (sql) return sql;
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   return null;
@@ -405,6 +437,12 @@ function extractSqlFromText(text: string): string | null {
   // ``` SELECT ... ``` (unlabelled code block starting with a SELECT keyword)
   const selectBlock = text.match(/```\s*(SELECT[\s\S]+?)\s*```/i);
   if (selectBlock?.[1]) return selectBlock[1].trim();
+
+  // Bare SELECT statement in plain text (no code block)
+  const bareSelect = text.match(/\b(SELECT\s[\s\S]+?;?\s*)(?=\n\n|\n[A-Z]|$)/i);
+  if (bareSelect?.[1]?.trim().toUpperCase().startsWith('SELECT')) {
+    return bareSelect[1].trim();
+  }
 
   return null;
 }

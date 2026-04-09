@@ -47,7 +47,7 @@ const DOWNSTREAM_FORMAT_INSTRUCTIONS: Partial<Record<AgentIntent, string>> = {
   MTREE:
     'Return columns: at least one dimension or segment column, BASELINE_SHARE as a decimal between 0 and 1, TARGET_SHARE as a decimal between 0 and 1, and SEGMENT_WEIGHT as an integer. Do not include NULL values.',
   CLUSTER:
-    'Return a unique identifier column and numeric feature columns only. COALESCE all NULLs to 0. Maximum 5000 rows.',
+    'Write a SELECT query that retrieves an entity identifier (such as a physician ID, customer ID, or product ID) and the key numeric metrics relevant to the segmentation question (e.g. volume, share, cost). Replace any NULL values with 0. Limit to 5000 rows.',
 };
 
 const FORECAST_INTENTS = new Set<AgentIntent>([
