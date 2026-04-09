@@ -14,6 +14,13 @@
  */
 
 import { authManager } from './auth';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const LOG_FILE = path.join(process.cwd(), 'cortex-agent-debug.log');
+function appendLog(msg: string) {
+  try { fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -91,6 +98,17 @@ export async function callCortexAgent(
 
   const agentUrl = `${BASE_URL}/api/v2/databases/${encodeURIComponent(db)}/schemas/${encodeURIComponent(schema)}/agents/${encodeURIComponent(name)}:run`;
 
+  // Clear log file for this request
+  try { fs.writeFileSync(LOG_FILE, ''); } catch { /* ignore */ }
+  appendLog(`>>> calling agent: ${agentRef}`);
+  appendLog(`>>> url: ${agentUrl}`);
+  appendLog(`>>> role: ${SNOWFLAKE_ROLE}`);
+  appendLog(`>>> messages[0]: ${messages[0]?.content?.slice(0, 300)}`);
+  console.log(`[CORTEX_AGENT] >>> calling agent: ${agentRef}`);
+  console.log(`[CORTEX_AGENT] >>> url: ${agentUrl}`);
+  console.log(`[CORTEX_AGENT] >>> role: ${SNOWFLAKE_ROLE}`);
+  console.log(`[CORTEX_AGENT] >>> messages[0] (truncated): ${messages[0]?.content?.slice(0, 200)}`);
+
   let response: Response;
   try {
     const baseHeaders = await authManager.getAuthHeaders();
@@ -100,24 +118,27 @@ export async function callCortexAgent(
       Accept: 'application/json, text/event-stream',
     };
 
+    console.time(`[CORTEX_AGENT] ${name} fetch`);
     response = await fetch(agentUrl, {
       method: 'POST',
       headers,
       signal,
       body: JSON.stringify({ messages: agentMessages, stream: true }),
     });
+    console.timeEnd(`[CORTEX_AGENT] ${name} fetch`);
   } catch (fetchErr) {
-    return {
-      text: '',
-      executionTimeMs: Date.now() - startMs,
-      error: `Network error calling ${name}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`,
-    };
+    const errMsg = `Network error calling ${name}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`;
+    console.error(`[CORTEX_AGENT] NETWORK ERROR: ${errMsg}`);
+    return { text: '', executionTimeMs: Date.now() - startMs, error: errMsg };
   }
+
+  console.log(`[CORTEX_AGENT] <<< HTTP ${response.status} content-type: ${response.headers.get('content-type')}`);
 
   if (!response.ok) {
     let errorMessage = `${name} request failed: HTTP ${response.status}`;
     try {
       const rawText = await response.text();
+      console.error(`[CORTEX_AGENT] ERROR BODY: ${rawText.slice(0, 500)}`);
       try {
         const errJson = JSON.parse(rawText) as Record<string, unknown>;
         const msg =
@@ -129,6 +150,7 @@ export async function callCortexAgent(
         if (rawText.trim()) errorMessage = `${name} ${response.status}: ${rawText.trim()}`;
       }
     } catch { /* ignore */ }
+    console.error(`[CORTEX_AGENT] FINAL ERROR: ${errorMessage}`);
     return { text: '', executionTimeMs: Date.now() - startMs, error: errorMessage };
   }
 
@@ -138,16 +160,26 @@ export async function callCortexAgent(
   const contentType = response.headers.get('content-type') ?? '';
 
   if (contentType.includes('text/event-stream')) {
+    console.log(`[CORTEX_AGENT] parsing SSE stream for ${name}`);
+    console.time(`[CORTEX_AGENT] ${name} SSE`);
     const parsed = await parseSSEStream(response, name, signal);
+    console.timeEnd(`[CORTEX_AGENT] ${name} SSE`);
+    console.log(`[CORTEX_AGENT] SSE result: text=${parsed.text.length} chars, sql=${!!parsed.sql}, data=${!!parsed.data}, error=${parsed.error}`);
+    if (parsed.error) console.error(`[CORTEX_AGENT] SSE error: ${parsed.error}`);
     return { ...parsed, executionTimeMs: Date.now() - startMs };
   }
 
   // Non-streaming JSON fallback
+  console.log(`[CORTEX_AGENT] parsing JSON response for ${name}`);
   try {
-    const json = (await response.json()) as Record<string, unknown>;
+    const rawBody = await response.text();
+    console.log(`[CORTEX_AGENT] JSON body (first 500 chars): ${rawBody.slice(0, 500)}`);
+    const json = JSON.parse(rawBody) as Record<string, unknown>;
     const parsed = extractFromJsonResponse(json, name);
+    console.log(`[CORTEX_AGENT] JSON result: text=${parsed.text.length} chars, sql=${!!parsed.sql}, data=${!!parsed.data}`);
     return { ...parsed, executionTimeMs: Date.now() - startMs };
-  } catch {
+  } catch (jsonErr) {
+    console.error(`[CORTEX_AGENT] JSON parse error: ${jsonErr}`);
     const raw = await response.text().catch(() => '');
     return { text: raw, executionTimeMs: Date.now() - startMs };
   }
@@ -175,6 +207,7 @@ async function parseSSEStream(
   let extractedSql: string | undefined;
   let extractedData: unknown;
   let currentEventType = '';
+  let rawEventCount = 0;
 
   // Accumulate Anthropic input_json_delta tool-input chunks per block index
   const toolInputAccum: Map<number, string> = new Map();
@@ -202,7 +235,30 @@ async function parseSSEStream(
         }
         if (line.startsWith('data:')) {
           const data = line.slice(5).trimStart();
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') { console.log(`[CORTEX_AGENT][SSE] [DONE] received after ${rawEventCount} events`); continue; }
+
+          // Surface Snowflake agent-level errors (event: error)
+          if (currentEventType === 'error') {
+            try {
+              const errJson = JSON.parse(data) as Record<string, unknown>;
+              const errMsg = (errJson['message'] as string | undefined) ?? data;
+              console.error(`[CORTEX_AGENT][SSE] ERROR event from ${agentName}: ${errMsg}`);
+              appendLog(`ERROR event: ${errMsg}`);
+              reader.releaseLock();
+              return { text: '', error: `${agentName}: ${errMsg}` };
+            } catch {
+              reader.releaseLock();
+              return { text: '', error: `${agentName} returned an error: ${data.slice(0, 200)}` };
+            }
+          }
+
+          rawEventCount++;
+          // Log first 20 raw events to diagnose format
+          if (rawEventCount <= 20) {
+            const msg = `[SSE] event#${rawEventCount} type="${currentEventType}" data=${data.slice(0, 400)}`;
+            console.log(`[CORTEX_AGENT]${msg}`);
+            appendLog(msg);
+          }
 
           try {
             const json = JSON.parse(data) as Record<string, unknown>;
@@ -279,6 +335,12 @@ async function parseSSEStream(
   if (!extractedData) {
     extractedData = extractJsonBlock(fullText);
   }
+
+  const summary = `SSE complete: totalEvents=${rawEventCount} fullText=${fullText.length} chars, sql=${!!extractedSql}, data=${!!extractedData}`;
+  console.log(`[CORTEX_AGENT] ${summary}`);
+  appendLog(summary);
+  if (fullText.length > 0) { console.log(`[CORTEX_AGENT] SSE fullText (first 300): ${fullText.slice(0, 300)}`); appendLog(`fullText: ${fullText.slice(0, 500)}`); }
+  if (extractedData) console.log(`[CORTEX_AGENT] SSE extractedData keys: ${JSON.stringify(Object.keys(extractedData as object)).slice(0, 200)}`);
 
   // Remove SQL/JSON code blocks from display text
   const displayText = fullText

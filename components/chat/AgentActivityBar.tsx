@@ -32,7 +32,7 @@ export default function AgentActivityBar({ activity }: { activity: AgentActivity
           style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border)" }}
         >
           <p>Agent: {activity.routedTo}</p>
-          <p>Latency: {activity.latency}</p>
+          <p>Analyzed in: {activity.latency}</p>
         </div>
       )}
     </div>

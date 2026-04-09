@@ -113,10 +113,27 @@ export async function classifyIntent(params: {
   }
 
   // ------------------------------------------------------------------
-  // Step 4: Multiple non-ANALYST unique intents → PIPELINE
+  // Step 4: Multiple non-ANALYST unique intents
   // ------------------------------------------------------------------
   const nonAnalystIntents = uniqueIntents.filter((i) => i !== 'ANALYST');
   if (nonAnalystIntents.length >= 2) {
+    // If every intent shares the same family prefix (e.g. CLUSTER_KMEANS +
+    // CLUSTER both belong to "CLUSTER"), a generic catch-all pattern fired
+    // alongside a specific algorithm intent.  Collapse to the highest-priority
+    // specific intent rather than escalating to PIPELINE.
+    const family = (intent: string) => {
+      const parts = intent.split('_');
+      return parts.length > 1 ? parts[0] : intent;
+    };
+    const families = new Set(nonAnalystIntents.map(family));
+    if (families.size === 1) {
+      // All same family — return highest-priority match (matches already sorted)
+      return {
+        intent: matches[0].intent,
+        confidence: 'deterministic',
+        matchedPatterns: matchedDescriptions,
+      };
+    }
     return {
       intent: 'PIPELINE',
       confidence: 'deterministic',

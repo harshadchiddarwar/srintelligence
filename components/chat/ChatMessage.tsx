@@ -7,6 +7,8 @@ import AgentActivityBar from "./AgentActivityBar";
 import DataTable from "./DataTable";
 import InlineChart from "./InlineChart";
 import FeedbackButtons from "@/src/components/chat/FeedbackButtons";
+import ForecastArtifact from "@/src/components/artifacts/ForecastArtifact";
+import type { AgentArtifact } from "@/src/types/agent";
 
 // ---------------------------------------------------------------------------
 // AI Avatar — gradient circle, two white sparkles (large + small)
@@ -283,12 +285,28 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
         <AIAvatar />
 
         <div className="flex flex-col gap-3 flex-1 min-w-0">
-          {message.content && (
-            <InlineMarkdown text={message.content} />
+          {message.forecastData ? (
+            <ForecastArtifact
+              artifact={{
+                id: message.id,
+                agentName: message.agentActivity?.routedTo ?? 'forecast',
+                intent: 'FORECAST_AUTO',
+                data: message.forecastData,
+                narrative: '',
+                createdAt: Date.now(),
+                lineageId: message.id,
+                cacheStatus: 'miss',
+              } as AgentArtifact}
+            />
+          ) : (
+            <>
+              {message.content && (
+                <InlineMarkdown text={message.content} />
+              )}
+              {message.chartData && <InlineChart data={message.chartData} />}
+              {message.tableData && <DataTable data={message.tableData} />}
+            </>
           )}
-
-          {message.chartData && <InlineChart data={message.chartData} />}
-          {message.tableData && <DataTable data={message.tableData} />}
 
           {message.suggestedFollowups && message.suggestedFollowups.length > 0 && (
             <div>

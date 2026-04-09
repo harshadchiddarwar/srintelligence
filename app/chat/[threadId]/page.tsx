@@ -9,6 +9,7 @@ import ChatInput from "@/components/chat/ChatInput";
 import ChatMessageComponent from "@/components/chat/ChatMessage";
 import { ChatMessage, ChatThread } from "@/lib/types";
 import type { DispatchEvent, FormattedResponse, AgentArtifact } from "@/src/types/agent";
+import { parseForecastNarrative } from "@/src/components/artifacts/ForecastArtifact";
 
 // ── Build a fresh empty thread ────────────────────────────────────────────────
 function emptyThread(id: string, title: string): ChatThread {
@@ -236,8 +237,13 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const analystArtifact = resp.artifacts.find((a) => a.intent === "ANALYST");
   const firstArtifact   = resp.artifacts[0];
 
-  let tableData  = analystArtifact ? artifactToTableData(analystArtifact) : (firstArtifact ? artifactToTableData(firstArtifact) : undefined);
-  const chartData  = firstArtifact ? artifactToChartData(firstArtifact) : undefined;
+  // Detect forecast intents — use structured rendering instead of raw markdown
+  const isForecast = /^FORECAST_/.test(resp.intent);
+
+  let tableData  = (!isForecast && analystArtifact) ? artifactToTableData(analystArtifact)
+                 : (!isForecast && firstArtifact)   ? artifactToTableData(firstArtifact)
+                 : undefined;
+  const chartData  = (!isForecast && firstArtifact) ? artifactToChartData(firstArtifact) : undefined;
 
   // Sort tableData rows by temporal column oldest → newest (MM/DD/YY format)
   if (tableData) {
@@ -251,8 +257,41 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
       tableData = { ...tableData, rows: [...tableData.rows].sort((a, b) => parseDateKey(a[tIdx]) - parseDateKey(b[tIdx])) };
     }
   }
+
+  // For forecast intents: parse the narrative into structured ForecastData.
+  // artifact.data may already be populated (v2 agents); fall back to parsing
+  // the narrative text (v3 Snowflake named agent returns markdown).
+  let forecastData: Record<string, unknown> | undefined;
+  if (isForecast) {
+    const artifactData = firstArtifact?.data as Record<string, unknown> | null | undefined;
+    console.log('[FORECAST_CLIENT] intent=', resp.intent);
+    console.log('[FORECAST_CLIENT] artifact.data=', artifactData);
+    console.log('[FORECAST_CLIENT] narrative length=', resp.narrative?.length ?? 0);
+    console.log('[FORECAST_CLIENT] narrative preview=', resp.narrative?.slice(0, 300));
+    if (artifactData && Object.keys(artifactData).length > 0) {
+      forecastData = artifactData;
+      console.log('[FORECAST_CLIENT] using artifact.data directly, keys=', Object.keys(artifactData));
+    } else {
+      forecastData = parseForecastNarrative(resp.narrative ?? '') as Record<string, unknown>;
+      console.log('[FORECAST_CLIENT] parsed from narrative:', {
+        hasForecast:    Array.isArray((forecastData as Record<string,unknown>)['forecast']),
+        forecastLen:    ((forecastData as Record<string,unknown>)['forecast'] as unknown[])?.length,
+        hasValidation:  Array.isArray((forecastData as Record<string,unknown>)['validation']),
+        validationLen:  ((forecastData as Record<string,unknown>)['validation'] as unknown[])?.length,
+        metrics:        (forecastData as Record<string,unknown>)['metrics'],
+        hasInsights:    Array.isArray((forecastData as Record<string,unknown>)['insights']),
+        hasModelNotes:  Array.isArray((forecastData as Record<string,unknown>)['modelNotes']),
+      });
+    }
+  }
+
   const sql        = analystArtifact?.sql ?? firstArtifact?.sql;
-  const latencyS   = (resp.durationMs / 1000).toFixed(1);
+  const latencyMs  = resp.durationMs;
+  const latencyMins = Math.floor(latencyMs / 60_000);
+  const latencySecs = Math.round((latencyMs % 60_000) / 1000);
+  const latencyLabel = latencyMins > 0
+    ? `${latencyMins}m ${latencySecs}s`
+    : `${latencySecs}s`;
 
   // Map intent to a human-readable label (no "Cortex" exposure)
   const intentLabel: Record<string, string> = {
@@ -275,14 +314,16 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const msg: ChatMessage = {
     id,
     role: "agent",
-    content: resp.narrative || "Analysis complete.",
+    // For forecast messages suppress the raw narrative — ForecastArtifact renders it
+    content: isForecast ? "" : (resp.narrative || "Analysis complete."),
     agentActivity: {
       masterAgent: "SRIntelligence™ Master Agent",
       routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",
-      latency: `${latencyS}s`,
+      latency: latencyLabel,
     },
     tableData:          tableData ?? undefined,
     chartData:          chartData ?? undefined,
+    forecastData:       forecastData,
     suggestedFollowups: resp.suggestions ?? [],
   };
 

@@ -22,6 +22,8 @@ export interface ChatMessage {
   tableData?: TableData;
   chartData?: ChartData[];
   suggestedFollowups?: string[];
+  /** Structured forecast data — when set, renders ForecastArtifact instead of plain markdown */
+  forecastData?: Record<string, unknown>;
 }
 
 export interface AgentActivity {

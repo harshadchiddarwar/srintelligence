@@ -78,6 +78,24 @@ function buildAgentResult(
     };
   }
 
+  // ── [FORECAST_LOG] Server-side diagnostic for forecast intents ──────────────
+  if (intent.startsWith('FORECAST')) {
+    console.log(`[FORECAST_LOG] intent=${intent} agent=${agentRef}`);
+    console.log(`[FORECAST_LOG] text length=${text.length} chars`);
+    console.log(`[FORECAST_LOG] text preview (first 300): ${text.slice(0, 300)}`);
+    console.log(`[FORECAST_LOG] data type=${typeof data} isNull=${data == null}`);
+    if (data != null && typeof data === 'object') {
+      console.log(`[FORECAST_LOG] data keys=${JSON.stringify(Object.keys(data as object))}`);
+      const d = data as Record<string, unknown>;
+      if (Array.isArray(d['historical'])) console.log(`[FORECAST_LOG] historical rows=${(d['historical'] as unknown[]).length}`);
+      if (Array.isArray(d['forecast']))   console.log(`[FORECAST_LOG] forecast rows=${  (d['forecast']   as unknown[]).length}`);
+      if (Array.isArray(d['validation'])) console.log(`[FORECAST_LOG] validation rows=${(d['validation'] as unknown[]).length}`);
+      if (d['metrics']) console.log(`[FORECAST_LOG] metrics=${JSON.stringify(d['metrics']).slice(0, 200)}`);
+    }
+    console.log(`[FORECAST_LOG] sql present=${!!sql}`);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   const artifact: AgentArtifact = {
     id: randomUUID(),
     agentName: agentRef,
@@ -133,12 +151,15 @@ export class RouteDispatcher {
     });
     console.timeEnd(`2_CLASSIFY_INTENT:${reqId}`);
 
+    console.log(`[DISPATCHER] intent=${classification.intent} confidence=${classification.confidence} patterns=[${classification.matchedPatterns.join(', ')}]`);
+
     const intent: AgentIntent =
       classification.intent === 'UNKNOWN' ? 'ANALYST' : classification.intent;
 
     // Look up the route
     const route = AGENT_ROUTING_MAP[intent];
     const agentName = route.displayName;
+    console.log(`[DISPATCHER] route: type=${route.type} agent=${route.cortexAgentName ?? 'n/a'} display="${agentName}"`);
 
     // -----------------------------------------------------------------------
     // 2. Routing event

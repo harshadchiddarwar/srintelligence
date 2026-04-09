@@ -162,6 +162,13 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     priority: 110,
     description: 'Explicit: mTree™ agent',
   },
+  {
+    // Explicit natural-language mention of metric tree / mTree overrides generic patterns
+    pattern: /\bm[\s-]?tree\b|\bmetric[\s-]tree\b|\buse\s+(?:metric[\s-])?tree\b/i,
+    intent: 'MTREE',
+    priority: 105,
+    description: 'Explicit: metric tree / mTree keyword',
+  },
 
   // -------------------------------------------------------------------------
   // Priority 100: Named forecasting models
@@ -261,8 +268,11 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     description: 'Causal driver identification',
   },
   {
+    // NOTE: \bDiD\b removed — case-insensitive flag makes it match the common
+    // word "did", causing false positives on queries like "why did X drop".
+    // The full "difference-in-difference" alternative below covers the same intent.
     pattern:
-      /\bcausal\s+(?:validat|assump|test)\w*\b|\bplacebo\s+test\b|\bdifference[\s-]in[\s-]difference\b|\bDiD\b/i,
+      /\bcausal\s+(?:validat|assump|test)\w*\b|\bplacebo\s+test\b|\bdifference[\s-]in[\s-]difference\b/i,
     intent: 'CAUSAL_VALIDATION',
     priority: 100,
     description: 'Causal assumption validation',
