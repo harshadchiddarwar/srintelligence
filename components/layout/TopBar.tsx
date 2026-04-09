@@ -62,21 +62,18 @@ function UserMenu() {
 export default function TopBar() {
   return (
     <header
-      className="flex items-center justify-between px-5 shrink-0"
+      className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0"
       style={{
-        height: "64px",
         background: "var(--bg-secondary)",
         borderBottom: "1px solid var(--border)",
       }}
     >
       {/* Logo */}
       {/*
-        Set fontSize on the Link so em-units on the <sup> resolve against 22px.
-        The ™ gets its OWN brand-gradient class (its own background-clip:text context),
-        so the gradient animates on it independently but with the same keyframe timing
-        → the two elements look like one continuous gradient.
-        verticalAlign "0.6em" = 0.6 × sup-font-size(11px) = 6.6px above baseline,
-        which is 30% of the parent 22px — same ratio as on the home heading (30%).
+        fontSize 28px (text-3xl) on the brand name.
+        ™ sup: 0.5em = 14px, verticalAlign 0.6em = 8.4px — same 30%-of-parent
+        ratio maintained.
+        Subtitle: 11px (text-xs), 600 weight, wide tracking.
       */}
       <Link
         href="/chat"
@@ -85,7 +82,7 @@ export default function TopBar() {
       >
         <div
           className="flex items-baseline gap-0 font-bold tracking-tight"
-          style={{ fontSize: "22px", lineHeight: 1.15 }}
+          style={{ fontSize: "28px", lineHeight: 1.15 }}
         >
           <span className="brand-gradient">SRIntelligence</span>
           <sup
@@ -95,7 +92,7 @@ export default function TopBar() {
         </div>
         <span
           style={{
-            fontSize: "8.5px",
+            fontSize: "11px",
             fontWeight: 600,
             letterSpacing: "0.10em",
             color: "var(--text-muted)",

@@ -33,33 +33,14 @@ export default function ChatHome() {
     <div className="flex flex-col h-full" style={{ background: "var(--bg-primary)" }}>
       {/* Center content */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 gap-8">
-        {/* Brand + greeting */}
+        {/* Greeting */}
         <div className="text-center">
-          {/*
-            Both elements carry brand-gradient individually — each clips its own
-            background to its own text. Same keyframe/timing → looks like one
-            continuous animated gradient.
-            verticalAlign "0.6em" = 0.6 × sup-font-size(15px) = 9px above baseline
-            = 30% of parent 30px — identical ratio to TopBar (30%).
-          */}
-          <h1 className="font-bold tracking-tight mb-1" style={{ fontSize: "30px", lineHeight: 1.2 }}>
-            <span className="brand-gradient">SRIntelligence</span>
-            <sup
-              className="brand-gradient"
-              style={{ fontSize: "0.5em", fontWeight: 500, verticalAlign: "0.6em", lineHeight: 1, marginLeft: "1px" }}
-            >™</sup>
-          </h1>
-          <div
-            className="w-24 h-px mx-auto mb-5"
-            style={{ background: "var(--border)" }}
-          />
           <p className="text-2xl font-medium mb-1" style={{ color: "var(--text-primary)" }}>
             {getGreeting()}, Harshad
           </p>
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             What would you like to analyze?
           </p>
-
         </div>
 
         {/* Recent analyses */}
