@@ -109,7 +109,7 @@ export async function POST(request: Request): Promise<Response> {
       };
 
       try {
-        for await (const event of dispatcher.dispatch(message)) {
+        for await (const event of dispatcher.dispatch(message, request.signal)) {
           send(event);
         }
       } catch (err) {

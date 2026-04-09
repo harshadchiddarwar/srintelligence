@@ -63,8 +63,9 @@ export async function callCortexAnalyst(params: {
   question: string;
   semanticView: string;
   conversationHistory?: AnalystMessage[];
+  signal?: AbortSignal;
 }): Promise<AnalystResponse> {
-  const { question, conversationHistory = [] } = params;
+  const { question, conversationHistory = [], signal } = params;
 
   // Build base headers and add the role header required for tool calls
   const baseHeaders = await authManager.getAuthHeaders();
@@ -104,6 +105,7 @@ export async function callCortexAnalyst(params: {
     response = await fetch(agentUrl, {
       method: 'POST',
       headers,
+      signal,
       body: JSON.stringify({ messages, stream: true }),
     });
   } catch (fetchErr) {
@@ -140,7 +142,7 @@ export async function callCortexAnalyst(params: {
   const contentType = response.headers.get('content-type') ?? '';
 
   if (contentType.includes('text/event-stream')) {
-    return parseSSEStream(response);
+    return parseSSEStream(response, signal);
   }
 
   // Non-streaming JSON fallback
@@ -157,7 +159,7 @@ export async function callCortexAnalyst(params: {
 // SSE stream parser
 // ---------------------------------------------------------------------------
 
-async function parseSSEStream(response: Response): Promise<AnalystResponse> {
+async function parseSSEStream(response: Response, signal?: AbortSignal): Promise<AnalystResponse> {
   const reader = response.body?.getReader();
   if (!reader) {
     return { text: '', suggestions: [], error: 'No response body from SRI_ANALYST_AGENT' };
@@ -174,6 +176,7 @@ async function parseSSEStream(response: Response): Promise<AnalystResponse> {
 
   try {
     while (true) {
+      if (signal?.aborted) break;
       const { done, value } = await reader.read();
       if (done) break;
 

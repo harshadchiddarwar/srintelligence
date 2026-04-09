@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useChatHistory } from "@/components/providers/ChatHistoryProvider";
 import { saveThreadMessages, loadThreadMessages } from "@/lib/chat-history";
-import { Pin, Sparkles, AlertCircle, ChevronDown, CheckCircle, Loader2 } from "lucide-react";
+import { Pin, AlertCircle, ChevronDown, CheckCircle, Loader2 } from "lucide-react";
 import ChatInput from "@/components/chat/ChatInput";
 import ChatMessageComponent from "@/components/chat/ChatMessage";
 import { ChatMessage, ChatThread } from "@/lib/types";
@@ -22,11 +22,14 @@ function StreamingStatus({ status }: { status: string }) {
       <div
         className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
         style={{
-          background: "linear-gradient(135deg, #2891DA, #FFA550)",
-          boxShadow: "0 1px 4px rgba(40,145,218,0.25)",
+          background: "linear-gradient(135deg, #2891DA 0%, #C8956A 100%)",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
         }}
       >
-        <Sparkles size={13} color="white" />
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z" fill="white" />
+          <path d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z" fill="white" />
+        </svg>
       </div>
       <div className="flex items-center gap-2 py-2">
         <Loader2 size={13} className="animate-spin" style={{ color: "var(--accent)" }} />
@@ -194,6 +197,7 @@ export default function ThreadPage() {
 
   const sessionIdRef    = useRef<string>(threadId);
   const bottomRef       = useRef<HTMLDivElement>(null);
+  const abortRef        = useRef<AbortController | null>(null);
   const { upsertThread, threads } = useChatHistory();
   // Track whether we've persisted this thread yet (avoids calling upsertThread
   // inside a setState updater, which React disallows).
@@ -266,10 +270,15 @@ export default function ThreadPage() {
 
     const agentMsgId = `msg-${Date.now()}-a`;
 
+    // Create a new abort controller for this request
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await fetch("/api/agent/chat", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
+        signal:  controller.signal,
         body: JSON.stringify({
           message:   query,
           sessionId: sessionIdRef.current,
@@ -360,10 +369,20 @@ export default function ThreadPage() {
       upsertThread(threadId, titleRef.current);
 
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      // AbortError = user clicked Stop — clear state silently
+      if (err instanceof Error && err.name === "AbortError") {
+        setStreamStatus("Stopped.");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
+      abortRef.current = null;
       setStreaming(false);
     }
+  }, []);
+
+  const handleAbort = useCallback(() => {
+    abortRef.current?.abort();
   }, []);
 
   // ── Save session as workflow ────────────────────────────────────────────────
@@ -418,7 +437,15 @@ export default function ThreadPage() {
       <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-6">
         {thread.messages.length === 0 && !streaming && (
           <div className="flex flex-col items-center justify-center flex-1 gap-3 text-center py-16">
-            <Sparkles size={28} style={{ color: "var(--accent)", opacity: 0.5 }} />
+            <div
+              className="w-12 h-12 rounded-full flex items-center justify-center"
+              style={{ background: "linear-gradient(135deg, #2891DA 0%, #C8956A 100%)", opacity: 0.5 }}
+            >
+              <svg width="28" height="28" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z" fill="white" />
+                <path d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z" fill="white" />
+              </svg>
+            </div>
             <p className="text-sm" style={{ color: "var(--text-muted)" }}>
               Ask anything about your Snowflake data
             </p>
@@ -461,6 +488,11 @@ export default function ThreadPage() {
         <ChatInput
           placeholder="Ask a follow-up…"
           onSubmit={handleSubmit}
+          onAbort={handleAbort}
+          history={thread.messages
+            .filter((m) => m.role === "user")
+            .map((m) => m.content)
+            .reverse()}
           compact
           disabled={streaming}
         />

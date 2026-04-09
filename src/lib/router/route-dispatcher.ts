@@ -76,7 +76,7 @@ async function loadForecastAgent(intent: AgentIntent) {
 export class RouteDispatcher {
   constructor(private context: ExecutionContext) {}
 
-  async *dispatch(message: string): AsyncGenerator<DispatchEvent> {
+  async *dispatch(message: string, signal?: AbortSignal): AsyncGenerator<DispatchEvent> {
     const startMs = now();
 
     // -----------------------------------------------------------------------
@@ -163,6 +163,7 @@ export class RouteDispatcher {
       semanticView: this.context.semanticView,
       conversationHistory: this.context.conversationHistory,
       userPreferences: this.context.userPreferences,
+      extraContext: { abortSignal: signal },
     };
 
     // -----------------------------------------------------------------------
@@ -464,6 +465,9 @@ export class RouteDispatcher {
         }
       }
     } catch (err) {
+      // AbortError = user pressed Stop — don't surface as a chat error
+      if (err instanceof Error && err.name === 'AbortError') return;
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       const errorMsg = err instanceof Error ? err.message : String(err);
       yield {
         ...baseEvent('AGENT_ERROR', this.context),

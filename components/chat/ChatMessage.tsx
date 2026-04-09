@@ -1,9 +1,12 @@
 "use client";
 
+import { useState, useRef, useEffect } from "react";
+import { Copy, Check, RotateCcw, Pencil, Send, X } from "lucide-react";
 import { ChatMessage as ChatMessageType } from "@/lib/types";
 import AgentActivityBar from "./AgentActivityBar";
 import DataTable from "./DataTable";
 import InlineChart from "./InlineChart";
+import FeedbackButtons from "@/src/components/chat/FeedbackButtons";
 
 // ---------------------------------------------------------------------------
 // AI Avatar — gradient circle, two white sparkles (large + small)
@@ -19,16 +22,8 @@ function AIAvatar() {
       }}
     >
       <svg width="17" height="17" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        {/* Large sparkle — 4-arm star, dominates the circle */}
-        <path
-          d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z"
-          fill="white"
-        />
-        {/* Small sparkle — upper-right, clearly secondary */}
-        <path
-          d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z"
-          fill="white"
-        />
+        <path d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z" fill="white" />
+        <path d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z" fill="white" />
       </svg>
     </div>
   );
@@ -60,7 +55,6 @@ function InlineMarkdown({ text }: { text: string }) {
   return (
     <div className="flex flex-col gap-0.5">
       {lines.map((line, li) => {
-        // Bullet list lines
         if (line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ")) {
           return (
             <div key={li} className="flex items-start gap-2">
@@ -71,7 +65,6 @@ function InlineMarkdown({ text }: { text: string }) {
             </div>
           );
         }
-        // Empty line → small spacer
         if (line.trim() === "") return <div key={li} className="h-1" />;
         return (
           <p key={li} className="text-sm leading-relaxed" style={{ color: "var(--text-primary)" }}>
@@ -79,6 +72,185 @@ function InlineMarkdown({ text }: { text: string }) {
           </p>
         );
       })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// User bubble with hover actions (edit / copy / rerun)
+// ---------------------------------------------------------------------------
+
+function UserBubble({
+  message,
+  onSubmit,
+}: {
+  message: ChatMessageType;
+  onSubmit?: (text: string) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(message.content);
+  const [copied, setCopied] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-focus + resize textarea when edit mode opens
+  useEffect(() => {
+    if (editing && textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.selectionStart = textareaRef.current.value.length;
+    }
+  }, [editing]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.content).catch(() => {
+      // Fallback for non-secure contexts
+      try {
+        const el = document.createElement("textarea");
+        el.value = message.content;
+        el.style.position = "fixed";
+        el.style.opacity = "0";
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand("copy");
+        document.body.removeChild(el);
+      } catch { /* ignore */ }
+    });
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleRerun = () => {
+    onSubmit?.(message.content);
+  };
+
+  const handleEditSubmit = () => {
+    const trimmed = editText.trim();
+    if (trimmed) {
+      onSubmit?.(trimmed);
+      setEditing(false);
+    }
+  };
+
+  const handleEditCancel = () => {
+    setEditText(message.content);
+    setEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleEditSubmit();
+    }
+    if (e.key === "Escape") {
+      handleEditCancel();
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-col items-end gap-1"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { if (!editing) setHovered(false); }}
+    >
+      {/* Bubble — normal or edit mode */}
+      {editing ? (
+        <div
+          className="w-full max-w-[75%] rounded-2xl rounded-tr-md overflow-hidden"
+          style={{
+            border: "1.5px solid var(--accent)",
+            background: "var(--accent-dim)",
+            boxShadow: "0 0 0 3px rgba(40,145,218,0.08)",
+          }}
+        >
+          <textarea
+            ref={textareaRef}
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={Math.min(8, (editText.match(/\n/g)?.length ?? 0) + 2)}
+            className="w-full bg-transparent text-sm leading-relaxed resize-none outline-none px-4 pt-3 pb-2"
+            style={{ color: "var(--text-primary)" }}
+          />
+          <div
+            className="flex items-center justify-end gap-2 px-3 pb-2.5"
+            style={{ borderTop: "1px solid rgba(40,145,218,0.12)" }}
+          >
+            <button
+              onClick={handleEditCancel}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-black/8"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <X size={11} />
+              Cancel
+            </button>
+            <button
+              onClick={handleEditSubmit}
+              disabled={!editText.trim()}
+              className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-colors hover:opacity-90 disabled:opacity-40"
+              style={{ background: "var(--accent)", color: "#ffffff" }}
+            >
+              <Send size={11} />
+              Send
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          className="max-w-[75%] px-4 py-2.5 rounded-2xl rounded-tr-md text-sm leading-relaxed"
+          style={{
+            background: "var(--accent-dim)",
+            color: "var(--text-primary)",
+            border: "1px solid rgba(40,145,218,0.12)",
+          }}
+        >
+          {message.content}
+        </div>
+      )}
+
+      {/* Hover action toolbar — fades in below the bubble */}
+      {!editing && (
+        <div
+          className="flex items-center gap-0.5 transition-all duration-150"
+          style={{ opacity: hovered ? 1 : 0, pointerEvents: hovered ? "auto" : "none" }}
+        >
+          {/* Edit */}
+          <button
+            onClick={() => { setEditing(true); setHovered(false); }}
+            title="Edit"
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors hover:bg-black/6"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Pencil size={11} />
+            <span>Edit</span>
+          </button>
+
+          <span style={{ color: "var(--border)", userSelect: "none" }}>·</span>
+
+          {/* Copy */}
+          <button
+            onClick={handleCopy}
+            title="Copy"
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors hover:bg-black/6"
+            style={{ color: copied ? "var(--success, #22c55e)" : "var(--text-muted)" }}
+          >
+            {copied ? <Check size={11} /> : <Copy size={11} />}
+            <span>{copied ? "Copied" : "Copy"}</span>
+          </button>
+
+          <span style={{ color: "var(--border)", userSelect: "none" }}>·</span>
+
+          {/* Rerun */}
+          <button
+            onClick={handleRerun}
+            title="Rerun"
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors hover:bg-black/6"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <RotateCcw size={11} />
+            <span>Rerun</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -96,16 +268,7 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div
-          className="max-w-[75%] px-4 py-2.5 rounded-2xl rounded-tr-md text-sm leading-relaxed"
-          style={{
-            background: "var(--accent-dim)",
-            color: "var(--text-primary)",
-            border: "1px solid rgba(40,145,218,0.12)",
-          }}
-        >
-          {message.content}
-        </div>
+        <UserBubble message={message} onSubmit={onFollowup} />
       </div>
     );
   }
@@ -117,11 +280,9 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
       )}
 
       <div className="flex items-start gap-2.5">
-        {/* Agent avatar */}
         <AIAvatar />
 
         <div className="flex flex-col gap-3 flex-1 min-w-0">
-          {/* Narrative text with markdown rendering */}
           {message.content && (
             <InlineMarkdown text={message.content} />
           )}
@@ -154,6 +315,12 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
               </div>
             </div>
           )}
+
+          {/* Feedback thumbs — only shown on completed agent messages */}
+          <FeedbackButtons
+            executionId={message.id}
+            agentName={message.agentActivity?.routedTo ?? "SRI_ANALYST_AGENT"}
+          />
         </div>
       </div>
     </div>

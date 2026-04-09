@@ -119,16 +119,46 @@ async function fetchPartition(
   return json.data ?? [];
 }
 
+/** Cancel a running Snowflake statement via DELETE /api/v2/statements/{handle} */
+async function cancelSnowflakeStatement(
+  handle: string,
+  headers: Record<string, string>,
+): Promise<void> {
+  try {
+    await fetch(`${BASE_URL}/api/v2/statements/${handle}/cancel`, {
+      method: 'POST',
+      headers,
+    });
+  } catch {
+    // Best-effort — ignore network errors on cancel
+  }
+}
+
 async function pollForResult(
   handle: string,
   headers: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<SnowflakeStatementResponse> {
   const url = `${BASE_URL}/api/v2/statements/${handle}`;
 
   for (;;) {
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    // Abort-aware sleep: resolves after POLL_INTERVAL_MS or rejects immediately on abort
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+      const timer = setTimeout(resolve, POLL_INTERVAL_MS);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    });
 
-    const response = await fetch(url, { method: 'GET', headers });
+    // Cancel on Snowflake and propagate
+    if (signal?.aborted) {
+      await cancelSnowflakeStatement(handle, headers);
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    const response = await fetch(url, { method: 'GET', headers, signal });
 
     if (!response.ok) {
       throw new SnowflakeError(`Async poll failed: HTTP ${response.status}`);
@@ -138,6 +168,11 @@ async function pollForResult(
     const status = json.status ?? '';
 
     if (status === 'RUNNING' || status === 'QUEUED') {
+      // Check once more after getting the response (race condition guard)
+      if (signal?.aborted) {
+        await cancelSnowflakeStatement(handle, headers);
+        throw new DOMException('Aborted', 'AbortError');
+      }
       continue;
     }
 
@@ -164,7 +199,7 @@ async function pollForResult(
  * @param userRole  - Optional Snowflake role. If provided, a USE ROLE statement
  *                    is prepended using a multi-statement request.
  */
-export async function executeSQL(sql: string, userRole?: string): Promise<SQLResult> {
+export async function executeSQL(sql: string, userRole?: string, signal?: AbortSignal): Promise<SQLResult> {
   const headers = await authManager.getAuthHeaders();
 
   let statement = sql;
@@ -190,6 +225,7 @@ export async function executeSQL(sql: string, userRole?: string): Promise<SQLRes
   const response = await fetch(`${BASE_URL}/api/v2/statements`, {
     method: 'POST',
     headers: { ...headers, ...extraHeaders },
+    signal,
     body: JSON.stringify(requestBody),
   });
 
@@ -205,7 +241,16 @@ export async function executeSQL(sql: string, userRole?: string): Promise<SQLRes
     if (!handle) {
       throw new SnowflakeError('Async statement returned no statementHandle');
     }
-    json = await pollForResult(handle, headers);
+    // Register an immediate cancel if the signal is already fired
+    if (signal?.aborted) {
+      await cancelSnowflakeStatement(handle, headers);
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    // Also cancel on Snowflake if the signal fires while we're polling
+    signal?.addEventListener('abort', () => {
+      cancelSnowflakeStatement(handle, headers).catch(() => {});
+    }, { once: true });
+    json = await pollForResult(handle, headers, signal);
   } else {
     const errorJson = (await response.json().catch(() => ({}))) as SnowflakeStatementResponse;
     throw new SnowflakeError(

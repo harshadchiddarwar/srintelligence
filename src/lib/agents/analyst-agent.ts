@@ -146,13 +146,17 @@ export class AnalystAgent {
     // ------------------------------------------------------------------
     const conversationHistory = this.buildConversationHistory(input.conversationHistory);
 
+    // Extract abort signal threaded from the route handler
+    const abortSignal = input.extraContext?.abortSignal as AbortSignal | undefined;
+
     // ------------------------------------------------------------------
-    // Call Cortex Analyst
+    // Call Cortex Analyst / SRI_ANALYST_AGENT
     // ------------------------------------------------------------------
     const analystResponse = await callCortexAnalyst({
       question: input.message,
       semanticView: input.semanticView.fullyQualifiedName,
       conversationHistory,
+      signal: abortSignal,
     });
 
     if (analystResponse.error) {
@@ -176,7 +180,7 @@ export class AnalystAgent {
         // Do not prepend USE ROLE — the PAT already authenticates as the
         // correct role. Passing a role argument would create a 2-statement
         // request that conflicts with the default statement count of 1.
-        const sqlResult = await executeSQL(sql);
+        const sqlResult = await executeSQL(sql, undefined, abortSignal);
         sqlRows = sqlResult.rows;
         sqlColumns = sqlResult.columns;
       } catch (err) {
@@ -257,11 +261,13 @@ export class AnalystAgent {
       : userQuestion;
 
     const conversationHistory = this.buildConversationHistory(context.conversationHistory);
+    const abortSignal = context.extraContext?.abortSignal as AbortSignal | undefined;
 
     const analystResponse = await callCortexAnalyst({
       question: augmentedQuestion,
       semanticView: context.semanticView.fullyQualifiedName,
       conversationHistory,
+      signal: abortSignal,
     });
 
     if (analystResponse.error) {

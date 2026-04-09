@@ -32,6 +32,60 @@ export interface RoutePattern {
  */
 export const ROUTE_PATTERNS: RoutePattern[] = [
   // -------------------------------------------------------------------------
+  // Priority 110: Explicit agent/model selection via the "/" picker
+  // These tags are inserted verbatim by the ChatInput agent picker and must
+  // take precedence over every other pattern.
+  // -------------------------------------------------------------------------
+  {
+    pattern: /@Analytics\b/i,
+    intent: 'ANALYST',
+    priority: 110,
+    description: 'Explicit: Analytics agent',
+  },
+  {
+    pattern: /@Forecast\/Prophet\b/i,
+    intent: 'FORECAST_PROPHET',
+    priority: 110,
+    description: 'Explicit: Forecast / Prophet',
+  },
+  {
+    pattern: /@Forecast\/SARIMA\b/i,
+    intent: 'FORECAST_SARIMA',
+    priority: 110,
+    description: 'Explicit: Forecast / SARIMA',
+  },
+  {
+    pattern: /@Forecast\/Holt-Winters\b/i,
+    intent: 'FORECAST_HW',
+    priority: 110,
+    description: 'Explicit: Forecast / Holt-Winters',
+  },
+  {
+    pattern: /@Forecast\/XGBoost\b/i,
+    intent: 'FORECAST_XGB',
+    priority: 110,
+    description: 'Explicit: Forecast / XGBoost',
+  },
+  {
+    pattern: /@Forecast\b/i,
+    intent: 'FORECAST_AUTO',
+    priority: 105,
+    description: 'Explicit: Forecast (auto-select model)',
+  },
+  {
+    pattern: /@Clustering\b/i,
+    intent: 'CLUSTER',
+    priority: 110,
+    description: 'Explicit: Clustering agent',
+  },
+  {
+    pattern: /@mTree\b/i,
+    intent: 'MTREE',
+    priority: 110,
+    description: 'Explicit: mTree™ agent',
+  },
+
+  // -------------------------------------------------------------------------
   // Priority 100: Named forecasting models
   // -------------------------------------------------------------------------
   {

@@ -781,5 +781,45 @@ WHERE EXPIRES_AT < CURRENT_TIMESTAMP();
 
 
 -- =============================================================================
+-- SECTION: SEMANTIC_VIEW_REGISTRY
+-- Stores the Snowflake semantic views that SRIntelligence™ can route queries to.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS PUBLIC.SEMANTIC_VIEW_REGISTRY (
+    VIEW_ID                 VARCHAR(128)    NOT NULL,
+    DISPLAY_NAME            VARCHAR(256)    NOT NULL,
+    DESCRIPTION             TEXT,
+    FULLY_QUALIFIED_NAME    VARCHAR(512)    NOT NULL,  -- e.g. CORTEX_TESTING.PUBLIC.CORTEX_TESTCASE
+    ALLOWED_ROLES           VARIANT,                   -- JSON array of role names; empty = all roles
+    IS_DEFAULT              BOOLEAN         DEFAULT FALSE,
+    IS_ACTIVE               BOOLEAN         DEFAULT TRUE,
+    TAGS                    VARIANT,                   -- JSON array of tag strings
+    CREATED_AT              TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT              TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_SEMANTIC_VIEW_REGISTRY PRIMARY KEY (VIEW_ID)
+);
+
+-- Seed the CORTEX_TESTCASE semantic view (default for all roles)
+MERGE INTO PUBLIC.SEMANTIC_VIEW_REGISTRY AS t
+USING (
+    SELECT
+        'cortex_testcase'                          AS view_id,
+        'Analytics'                                AS display_name,
+        'Rx claims, drug reference, physicians & plan data' AS description,
+        'CORTEX_TESTING.PUBLIC.CORTEX_TESTCASE'    AS fully_qualified_name,
+        PARSE_JSON('[]')                           AS allowed_roles,
+        TRUE                                       AS is_default,
+        TRUE                                       AS is_active,
+        PARSE_JSON('["pharma","rx","claims"]')     AS tags
+) AS s ON t.VIEW_ID = s.view_id
+WHEN NOT MATCHED THEN INSERT (
+    VIEW_ID, DISPLAY_NAME, DESCRIPTION, FULLY_QUALIFIED_NAME,
+    ALLOWED_ROLES, IS_DEFAULT, IS_ACTIVE, TAGS
+) VALUES (
+    s.view_id, s.display_name, s.description, s.fully_qualified_name,
+    s.allowed_roles, s.is_default, s.is_active, s.tags
+);
+
+-- =============================================================================
 -- END OF SETUP SCRIPT
 -- =============================================================================

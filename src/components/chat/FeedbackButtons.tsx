@@ -53,7 +53,7 @@ export default function FeedbackButtons({ lineageId, executionId, stepId, agentN
           rating,
           category,
           comment,
-          correctedSQL: category === 'incorrect_sql' ? correctedSQL : undefined,
+          sqlCorrection: category === 'incorrect_sql' ? correctedSQL : undefined,
         }),
       })
       setSubmitted(true)
