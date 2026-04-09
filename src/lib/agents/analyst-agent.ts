@@ -46,8 +46,7 @@ const DOWNSTREAM_FORMAT_INSTRUCTIONS: Partial<Record<AgentIntent, string>> = {
     "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
   MTREE:
     'Return columns: at least one dimension or segment column, BASELINE_SHARE as a decimal between 0 and 1, TARGET_SHARE as a decimal between 0 and 1, and SEGMENT_WEIGHT as an integer. Do not include NULL values.',
-  CLUSTER:
-    'Write a SELECT query that retrieves an entity identifier (such as a physician ID, customer ID, or product ID) and the key numeric metrics relevant to the segmentation question (e.g. volume, share, cost). Replace any NULL values with 0. Limit to 5000 rows.',
+  // CLUSTER is handled by buildPrimaryQuestion() with schema-aware column names
 };
 
 const FORECAST_INTENTS = new Set<AgentIntent>([
@@ -246,6 +245,11 @@ export class AnalystAgent {
   /**
    * Ask Cortex Analyst to generate a SQL SELECT appropriate for feeding into
    * a downstream ML agent. Returns the raw SQL without executing it.
+   *
+   * For CLUSTER the question is rewritten to reference real semantic-model
+   * columns so Analyst reliably produces SQL rather than a text explanation.
+   * A simplified fallback question is retried automatically if the first
+   * attempt returns no SQL.
    */
   async prepareDataForDownstreamAgent(params: {
     userQuestion: string;
@@ -255,16 +259,16 @@ export class AnalystAgent {
     const { userQuestion, targetAgent, context } = params;
     const lineageId = randomUUID();
 
-    const formatInstruction = DOWNSTREAM_FORMAT_INSTRUCTIONS[targetAgent];
-    const augmentedQuestion = formatInstruction
-      ? `${userQuestion}\n\nIMPORTANT — Output format requirement: ${formatInstruction}`
-      : userQuestion;
-
     const conversationHistory = this.buildConversationHistory(context.conversationHistory);
     const abortSignal = context.extraContext?.abortSignal as AbortSignal | undefined;
 
+    // ------------------------------------------------------------------
+    // Build primary question
+    // ------------------------------------------------------------------
+    const primaryQuestion = this.buildPrimaryQuestion(userQuestion, targetAgent);
+
     const analystResponse = await callCortexAnalyst({
-      question: augmentedQuestion,
+      question: primaryQuestion,
       semanticView: context.semanticView.fullyQualifiedName,
       conversationHistory,
       signal: abortSignal,
@@ -274,7 +278,24 @@ export class AnalystAgent {
       return { error: analystResponse.error, lineageId };
     }
 
-    if (!analystResponse.sql) {
+    // ------------------------------------------------------------------
+    // Retry with simplified fallback if no SQL was returned
+    // ------------------------------------------------------------------
+    let sql = analystResponse.sql;
+
+    if (!sql) {
+      const fallbackQuestion = this.buildFallbackQuestion(targetAgent);
+      if (fallbackQuestion) {
+        const retryResponse = await callCortexAnalyst({
+          question: fallbackQuestion,
+          semanticView: context.semanticView.fullyQualifiedName,
+          signal: abortSignal,
+        });
+        if (!retryResponse.error) sql = retryResponse.sql;
+      }
+    }
+
+    if (!sql) {
       return {
         error: 'Cortex Analyst did not return SQL for the data preparation step.',
         lineageId,
@@ -287,11 +308,77 @@ export class AnalystAgent {
     const isForecast = FORECAST_INTENTS.has(targetAgent);
 
     return {
-      sql: analystResponse.sql,
+      sql,
       dateCol: isForecast ? 'WEEK_DATE' : undefined,
       valueCol: isForecast ? 'METRIC_VALUE' : undefined,
       lineageId,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Question builders
+  // -------------------------------------------------------------------------
+
+  private buildPrimaryQuestion(userQuestion: string, targetAgent: AgentIntent): string {
+    if (targetAgent === 'CLUSTER') {
+      return `
+${userQuestion}
+
+Generate a SQL query that creates a physician-level summary with the following requirements:
+
+1. The FIRST column must be physician_key as the unique identifier.
+2. All OTHER columns must be NUMERIC aggregations per physician:
+   - COUNT of dispensed claims (claim_status_code = 1) as total_claims
+   - COUNT of DISTINCT drugs prescribed as unique_drugs_prescribed
+   - COUNT of DISTINCT patients as unique_patients
+   - AVG of days supply as avg_days_supply
+   - AVG of patient out-of-pocket cost as avg_patient_pay
+   - AVG of plan payment as avg_primary_plan_pay
+   - AVG of usual and customary charge as avg_usual_customary_charge
+   - AVG of quantity dispensed as avg_qty_dispensed
+   - Percentage of brand claims vs total claims as pct_brand_claims
+3. Use COALESCE(..., 0) on every numeric column to eliminate NULLs.
+4. Apply these filters: claim_status_code = 1 AND (ptd_final_claim = 1 OR ptd_final_claim IS NULL).
+5. GROUP BY physician_key.
+6. ORDER BY total_claims DESC.
+7. LIMIT 5000 rows.
+
+Do NOT include any text, date, or categorical columns other than physician_key.
+      `.trim();
+    }
+
+    const formatInstruction = DOWNSTREAM_FORMAT_INSTRUCTIONS[targetAgent];
+    return formatInstruction
+      ? `${userQuestion}\n\nIMPORTANT — Output format requirement: ${formatInstruction}`
+      : userQuestion;
+  }
+
+  private buildFallbackQuestion(targetAgent: AgentIntent): string | null {
+    if (targetAgent === 'CLUSTER') {
+      return `
+Show me a physician-level summary with:
+physician_key,
+COUNT(*) as total_claims,
+COUNT(DISTINCT drug_id) as unique_drugs,
+COUNT(DISTINCT patient_gid) as unique_patients,
+AVG(product_days_supply) as avg_days_supply,
+AVG(primary_patient_pay) as avg_patient_pay,
+AVG(primary_plan_pay) as avg_primary_plan_pay,
+AVG(usual_customary_charge) as avg_usual_customary_charge
+per physician where claim_status_code = 1 and (ptd_final_claim = 1 OR ptd_final_claim IS NULL).
+Group by physician_key, order by total_claims descending, limit to 5000 rows.
+      `.trim();
+    }
+
+    if (FORECAST_INTENTS.has(targetAgent)) {
+      return `Show total claim count by week (DATE_TRUNC week) ordered by week ascending. Use claim_status_code = 1. Limit 500 rows.`;
+    }
+
+    if (targetAgent === 'MTREE') {
+      return `Show brand share and total share by physician segment. Include segment name, brand claims count, total claims count, and percentage brand share.`;
+    }
+
+    return null;
   }
 
   // -------------------------------------------------------------------------
