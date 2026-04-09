@@ -1,14 +1,15 @@
 /**
  * AnalystAgent — natural language → SQL via Snowflake Cortex Analyst REST API.
  *
- * Two modes of operation:
+ * Blueprint v3.0 role: PATH A of the RouteDispatcher.
+ * Handles open-ended data-exploration queries (intent = ANALYST).
  *
- * 1. execute(input)
- *    Full execution: question → Cortex Analyst → SQL → Snowflake → AgentResult
+ * execute(input)
+ *   Full execution: question → Cortex Analyst → SQL → Snowflake → AgentResult
  *
- * 2. prepareDataForDownstreamAgent(params)
- *    Prepares a SQL CTE for a downstream ML agent. The SQL is NOT executed —
- *    it is returned raw so the ML agent can embed it as a CTE.
+ * prepareDataForDownstreamAgent(params)
+ *   @deprecated v3.0 — Named Cortex Agents handle data prep internally.
+ *   Kept for reference; no longer called by the dispatcher.
  */
 
 import { randomUUID } from 'crypto';
@@ -30,23 +31,30 @@ const AGENT_NAME = 'analyst';
 const AGENT_DISPLAY_NAME = 'Cortex Analyst';
 const AGENT_INTENT: AgentIntent = 'ANALYST';
 
-// Downstream format instructions keyed by target intent
-const DOWNSTREAM_FORMAT_INSTRUCTIONS: Partial<Record<AgentIntent, string>> = {
-  FORECAST_PROPHET:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  FORECAST_SARIMA:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  FORECAST_HW:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  FORECAST_XGB:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  FORECAST_COMPARE:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  FORECAST_AUTO:
-    "Return exactly 2 columns: DATE_TRUNC('week', date_col) AS WEEK_DATE and COUNT(*) or SUM(value_col) AS METRIC_VALUE, ordered by WEEK_DATE ascending. Do not include any other columns.",
-  MTREE:
-    'Return columns: at least one dimension or segment column, BASELINE_SHARE as a decimal between 0 and 1, TARGET_SHARE as a decimal between 0 and 1, and SEGMENT_WEIGHT as an integer. Do not include NULL values.',
-  // CLUSTER is handled by buildPrimaryQuestion() with schema-aware column names
+// Simple hints keyed by target intent — used in Pass 1 to guide Cortex Analyst
+// without imposing rigid schema requirements (those are handled in Pass 2).
+const DOWNSTREAM_HINTS: Partial<Record<AgentIntent, string>> = {
+  FORECAST_PROPHET: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_SARIMA: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_HW: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_XGB: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_HYBRID: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_COMPARE: 'Return time series data with a date column and a numeric metric column.',
+  FORECAST_AUTO: 'Return time series data with a date column and a numeric metric column.',
+  MTREE: 'Return segmented data with a segment or group column and numeric metrics (counts, shares, or amounts).',
+  CLUSTER: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_GM: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_DBSCAN: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_HIERARCHICAL: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_KMEANS: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_KMEDOIDS: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CLUSTER_COMPARE: 'Return a physician-level summary. Include physician_key and numeric aggregations (claim counts, patient counts, drug counts, payment amounts).',
+  CAUSAL_AUTO: 'Return longitudinal data with a period/date column, an outcome metric column, and at least one driver/feature column.',
+  CAUSAL_CONTRIBUTION: 'Return longitudinal data with a period/date column, an outcome metric column, and at least one driver/feature column. Include a period label column distinguishing baseline from target periods.',
+  CAUSAL_DRIVERS: 'Return panel data with an outcome metric column and multiple potential driver/feature columns.',
+  CAUSAL_VALIDATION: 'Return longitudinal data with a period/date column, an outcome metric column, and a binary treatment indicator column (0=control, 1=treated).',
+  CAUSAL_NARRATIVE: 'Return the structured output of a prior causal analysis function (CAUSAL_CONTRIBUTION or CAUSAL_DRIVERS).',
+  CAUSAL_PIPELINE: 'Return longitudinal panel data with a period column, outcome metric, treatment indicator, and driver/feature columns.',
 };
 
 const FORECAST_INTENTS = new Set<AgentIntent>([
@@ -54,6 +62,7 @@ const FORECAST_INTENTS = new Set<AgentIntent>([
   'FORECAST_SARIMA',
   'FORECAST_HW',
   'FORECAST_XGB',
+  'FORECAST_HYBRID',
   'FORECAST_COMPARE',
   'FORECAST_AUTO',
 ]);
@@ -151,14 +160,19 @@ export class AnalystAgent {
     // ------------------------------------------------------------------
     // Call Cortex Analyst / SRI_ANALYST_AGENT
     // ------------------------------------------------------------------
+    const question = input.message;
+
+    console.time('5a_ANALYST_REST_CALL');
     const analystResponse = await callCortexAnalyst({
-      question: input.message,
+      question,
       semanticView: input.semanticView.fullyQualifiedName,
       conversationHistory,
       signal: abortSignal,
     });
+    console.timeEnd('5a_ANALYST_REST_CALL');
 
     if (analystResponse.error) {
+      console.error('[AnalystAgent] Cortex Analyst error:', analystResponse.error);
       return this.makeErrorResult(
         analystResponse.error,
         'ANALYST_API_ERROR',
@@ -172,16 +186,22 @@ export class AnalystAgent {
     // ------------------------------------------------------------------
     let sqlRows: Record<string, unknown>[] = [];
     let sqlColumns: string[] = [];
-    const sql = analystResponse.sql;
+    const sql = analystResponse.sql ?? null;
+
+    console.log('[AnalystAgent] generated SQL:', sql ?? '(none)');
 
     if (sql) {
       try {
         // Do not prepend USE ROLE — the PAT already authenticates as the
         // correct role. Passing a role argument would create a 2-statement
         // request that conflicts with the default statement count of 1.
+        console.time('5b_SQL_EXECUTION');
         const sqlResult = await executeSQL(sql, undefined, abortSignal);
+        console.timeEnd('5b_SQL_EXECUTION');
         sqlRows = sqlResult.rows;
         sqlColumns = sqlResult.columns;
+        console.log('[AnalystAgent] columns:', sqlColumns.join(', '));
+        console.log('[AnalystAgent] row[0]:', JSON.stringify(sqlRows[0]));
       } catch (err) {
         return this.makeErrorResult(
           `SQL execution failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -202,19 +222,49 @@ export class AnalystAgent {
       sqlColumns.map((col) => row[col] as string | number),
     );
 
+    // ------------------------------------------------------------------
+    // Narrative enrichment via Claude Haiku
+    // The direct Cortex Analyst API returns a brief text explanation.
+    // If it's short and we have data, enrich it with key observations.
+    // ------------------------------------------------------------------
+    let narrative = analystResponse.text || undefined;
+    if (sqlRows.length > 0 && (!narrative || narrative.length < 300)) {
+      try {
+        const Anthropic = (await import('@anthropic-ai/sdk')).default;
+        const claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        const sampleRows = resultRows.slice(0, 5)
+          .map((r) => sqlColumns.map((col, i) => `${col}: ${r[i]}`).join(', '))
+          .join('\n');
+        const resp = await claudeClient.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 400,
+          messages: [{
+            role: 'user',
+            content: `Question: "${input.message}"\nColumns: ${sqlColumns.join(', ')}\nRow count: ${sqlRows.length}\nSample rows:\n${sampleRows}\n\nWrite 2-3 concise bullet points summarising key insights. Be specific with numbers.`,
+          }],
+        });
+        const block = resp.content[0];
+        if (block.type === 'text') narrative = block.text;
+      } catch {
+        // Non-blocking — fall back to Cortex Analyst text
+      }
+    }
+
     const primaryArtifact: AgentArtifact = {
       id: randomUUID(),
       agentName: this.name,
       intent: this.intent,
-      data: sql
+      data: sql && sqlColumns.length > 0
         ? {
-            results: sqlRows.length > 0
-              ? { headers: sqlColumns, rows: resultRows }
-              : undefined,
+            // Always include headers so the table renders even when the query
+            // returns 0 rows — the DataTable will show "0 rows" with column names.
+            results: { headers: sqlColumns, rows: resultRows },
           }
-        : { type: 'text', text: analystResponse.text, suggestions: analystResponse.suggestions },
+        : analystResponse.data !== undefined
+          ? analystResponse.data
+          : { type: 'text', text: analystResponse.text, suggestions: analystResponse.suggestions },
       sql: sql ?? undefined,
-      narrative: analystResponse.text || undefined,
+      narrative,
       createdAt: Date.now(),
       lineageId,
       cacheStatus: 'miss',
@@ -243,13 +293,24 @@ export class AnalystAgent {
   // -------------------------------------------------------------------------
 
   /**
-   * Ask Cortex Analyst to generate a SQL SELECT appropriate for feeding into
-   * a downstream ML agent. Returns the raw SQL without executing it.
+   * Two-pass data preparation for downstream ML agents.
    *
-   * For CLUSTER the question is rewritten to reference real semantic-model
-   * columns so Analyst reliably produces SQL rather than a text explanation.
-   * A simplified fallback question is retried automatically if the first
-   * attempt returns no SQL.
+   * Pass 1 — natural language → raw SQL:
+   *   Ask Cortex Analyst a focused but schema-free question. We only hint at
+   *   the kind of data needed (time series, physician-level, segmented) without
+   *   imposing rigid column aliases that confuse the Analyst.
+   *
+   * Pass 2 — column introspection → schema-compliant SQL:
+   *   Dry-run the raw SQL (LIMIT 1) to discover actual column names and one
+   *   sample row, then use SQLTransformer to wrap it in a CTE that produces
+   *   the exact schema each ML agent expects.
+   *
+   * @deprecated Blueprint v3.0 — Named Snowflake Cortex Agents
+   * (SRI_FORECAST_AGENT, SRI_CLUSTERING_AGENT, SRI_META_TREE,
+   * SRI_CAUSAL_INFERENCE_AGENT) handle all data preparation and SQL
+   * construction internally.  The RouteDispatcher and PipelineExecutor now
+   * call callCortexAgent() directly.  This method is kept to avoid breaking
+   * any external references but is no longer called by the dispatcher.
    */
   async prepareDataForDownstreamAgent(params: {
     userQuestion: string;
@@ -263,9 +324,9 @@ export class AnalystAgent {
     const abortSignal = context.extraContext?.abortSignal as AbortSignal | undefined;
 
     // ------------------------------------------------------------------
-    // Build primary question
+    // Pass 1 — natural language → raw SQL via Cortex Analyst
     // ------------------------------------------------------------------
-    const primaryQuestion = this.buildPrimaryQuestion(userQuestion, targetAgent);
+    const primaryQuestion = this.buildSimpleQuestion(userQuestion, targetAgent);
 
     const analystResponse = await callCortexAnalyst({
       question: primaryQuestion,
@@ -278,12 +339,10 @@ export class AnalystAgent {
       return { error: analystResponse.error, lineageId };
     }
 
-    // ------------------------------------------------------------------
-    // Retry with simplified fallback if no SQL was returned
-    // ------------------------------------------------------------------
-    let sql = analystResponse.sql;
+    let rawSql = analystResponse.sql;
 
-    if (!sql) {
+    // Retry with a more explicit fallback if no SQL was returned
+    if (!rawSql) {
       const fallbackQuestion = this.buildFallbackQuestion(targetAgent);
       if (fallbackQuestion) {
         const retryResponse = await callCortexAnalyst({
@@ -291,26 +350,55 @@ export class AnalystAgent {
           semanticView: context.semanticView.fullyQualifiedName,
           signal: abortSignal,
         });
-        if (!retryResponse.error) sql = retryResponse.sql;
+        if (!retryResponse.error) rawSql = retryResponse.sql;
       }
     }
 
-    if (!sql) {
+    if (!rawSql) {
+      const agentText = analystResponse.text?.slice(0, 300) || '(no text)';
       return {
-        error: 'Cortex Analyst did not return SQL for the data preparation step.',
+        error: `Cortex Analyst did not return SQL. Agent response: "${agentText}"`,
         lineageId,
       };
     }
 
-    // Record lineage for this prep step (non-blocking)
+    // ------------------------------------------------------------------
+    // Pass 2 — dry-run → column metadata → schema-compliant SQL
+    // ------------------------------------------------------------------
+    const { SchemaValidator } = await import('./schema-validator');
+    const dryRun = await SchemaValidator.dryRun(rawSql, abortSignal);
+
+    if (dryRun.error) {
+      // Dry-run failed — return raw SQL and let the downstream agent handle it
+      this.recordLineage(context, lineageId).catch(() => {});
+      return { sql: rawSql, lineageId };
+    }
+
+    const { SQLTransformer } = await import('./sql-transformer');
+    let transformResult: import('./sql-transformer').TransformResult;
+
+    if (FORECAST_INTENTS.has(targetAgent)) {
+      transformResult = SQLTransformer.transformForForecast(rawSql, dryRun.columns, dryRun.sampleRow);
+    } else if (targetAgent === 'CLUSTER') {
+      transformResult = SQLTransformer.transformForCluster(rawSql, dryRun.columns, dryRun.sampleRow);
+    } else if (targetAgent === 'MTREE') {
+      transformResult = SQLTransformer.transformForMTree(rawSql, dryRun.columns, dryRun.sampleRow);
+    } else {
+      transformResult = { sql: rawSql };
+    }
+
+    if (transformResult.error) {
+      // Transformation couldn't map columns — fall back to raw SQL
+      this.recordLineage(context, lineageId).catch(() => {});
+      return { sql: rawSql, lineageId };
+    }
+
     this.recordLineage(context, lineageId).catch(() => {});
 
-    const isForecast = FORECAST_INTENTS.has(targetAgent);
-
     return {
-      sql,
-      dateCol: isForecast ? 'WEEK_DATE' : undefined,
-      valueCol: isForecast ? 'METRIC_VALUE' : undefined,
+      sql: transformResult.sql,
+      dateCol: transformResult.dateCol,
+      valueCol: transformResult.valueCol,
       lineageId,
     };
   }
@@ -319,63 +407,85 @@ export class AnalystAgent {
   // Question builders
   // -------------------------------------------------------------------------
 
-  private buildPrimaryQuestion(userQuestion: string, targetAgent: AgentIntent): string {
-    if (targetAgent === 'CLUSTER') {
-      return `
-${userQuestion}
+  /**
+   * Build a natural-language question for Cortex Analyst.
+   * The question includes a light hint about the data shape needed
+   * but does NOT impose rigid column aliases — those are applied in Pass 2
+   * by SQLTransformer after we introspect the actual columns.
+   */
+  private buildSimpleQuestion(userQuestion: string, targetAgent: AgentIntent): string {
+    // For all CLUSTER_* variants, the user question often contains ML directives
+    // ("Use GMM clustering", "segment into N groups", "DBSCAN with eps=0.5") that
+    // confuse Cortex Analyst. Replace entirely with a clean data-retrieval question —
+    // the clustering algorithm is handled downstream.
+    const isClusterIntent = (
+      targetAgent === 'CLUSTER' ||
+      targetAgent === 'CLUSTER_GM' ||
+      targetAgent === 'CLUSTER_DBSCAN' ||
+      targetAgent === 'CLUSTER_HIERARCHICAL' ||
+      targetAgent === 'CLUSTER_KMEANS' ||
+      targetAgent === 'CLUSTER_KMEDOIDS' ||
+      targetAgent === 'CLUSTER_COMPARE'
+    );
 
-Generate a SQL query that creates a physician-level summary with the following requirements:
-
-1. The FIRST column must be physician_key as the unique identifier.
-2. All OTHER columns must be NUMERIC aggregations per physician:
-   - COUNT of dispensed claims (claim_status_code = 1) as total_claims
-   - COUNT of DISTINCT drugs prescribed as unique_drugs_prescribed
-   - COUNT of DISTINCT patients as unique_patients
-   - AVG of days supply as avg_days_supply
-   - AVG of patient out-of-pocket cost as avg_patient_pay
-   - AVG of plan payment as avg_primary_plan_pay
-   - AVG of usual and customary charge as avg_usual_customary_charge
-   - AVG of quantity dispensed as avg_qty_dispensed
-   - Percentage of brand claims vs total claims as pct_brand_claims
-3. Use COALESCE(..., 0) on every numeric column to eliminate NULLs.
-4. Apply these filters: claim_status_code = 1 AND (ptd_final_claim = 1 OR ptd_final_claim IS NULL).
-5. GROUP BY physician_key.
-6. ORDER BY total_claims DESC.
-7. LIMIT 5000 rows.
-
-Do NOT include any text, date, or categorical columns other than physician_key.
-      `.trim();
+    if (isClusterIntent) {
+      return (
+        'Show me a physician-level summary with prescribing metrics: ' +
+        'physician_key, total dispensed claims, number of distinct drugs prescribed, ' +
+        'number of distinct patients, average days supply, average patient out-of-pocket cost, ' +
+        'average plan payment amount. Filter to dispensed claims only.'
+      );
     }
 
-    const formatInstruction = DOWNSTREAM_FORMAT_INSTRUCTIONS[targetAgent];
-    return formatInstruction
-      ? `${userQuestion}\n\nIMPORTANT — Output format requirement: ${formatInstruction}`
-      : userQuestion;
+    // For CAUSAL_* intents, strip algorithm-specific language and keep the
+    // data retrieval part of the question.
+    const isCausalIntent = (
+      targetAgent === 'CAUSAL_AUTO' ||
+      targetAgent === 'CAUSAL_CONTRIBUTION' ||
+      targetAgent === 'CAUSAL_DRIVERS' ||
+      targetAgent === 'CAUSAL_VALIDATION' ||
+      targetAgent === 'CAUSAL_NARRATIVE' ||
+      targetAgent === 'CAUSAL_PIPELINE'
+    );
+
+    if (isCausalIntent) {
+      const hint = DOWNSTREAM_HINTS[targetAgent];
+      return hint
+        ? `${userQuestion}\n\nData shape needed: ${hint}`
+        : userQuestion;
+    }
+
+    const hint = DOWNSTREAM_HINTS[targetAgent];
+    return hint ? `${userQuestion}\n\nData shape needed: ${hint}` : userQuestion;
   }
 
+  /**
+   * Fallback question used when Cortex Analyst returns no SQL on the first try.
+   * More explicit than the primary question to maximize the chance of getting SQL.
+   */
   private buildFallbackQuestion(targetAgent: AgentIntent): string | null {
-    if (targetAgent === 'CLUSTER') {
-      return `
-Show me a physician-level summary with:
-physician_key,
-COUNT(*) as total_claims,
-COUNT(DISTINCT drug_id) as unique_drugs,
-COUNT(DISTINCT patient_gid) as unique_patients,
-AVG(product_days_supply) as avg_days_supply,
-AVG(primary_patient_pay) as avg_patient_pay,
-AVG(primary_plan_pay) as avg_primary_plan_pay,
-AVG(usual_customary_charge) as avg_usual_customary_charge
-per physician where claim_status_code = 1 and (ptd_final_claim = 1 OR ptd_final_claim IS NULL).
-Group by physician_key, order by total_claims descending, limit to 5000 rows.
-      `.trim();
+    const clusterIntents: AgentIntent[] = [
+      'CLUSTER', 'CLUSTER_GM', 'CLUSTER_DBSCAN', 'CLUSTER_HIERARCHICAL',
+      'CLUSTER_KMEANS', 'CLUSTER_KMEDOIDS', 'CLUSTER_COMPARE',
+    ];
+    if (clusterIntents.includes(targetAgent)) {
+      return 'Show me total claim count, unique patient count, and average days supply per physician. Limit to 5000 rows.';
     }
 
     if (FORECAST_INTENTS.has(targetAgent)) {
-      return `Show total claim count by week (DATE_TRUNC week) ordered by week ascending. Use claim_status_code = 1. Limit 500 rows.`;
+      return 'Show total claim count by week ordered by week ascending. Use claim_status_code = 1. Limit 500 rows.';
     }
 
     if (targetAgent === 'MTREE') {
-      return `Show brand share and total share by physician segment. Include segment name, brand claims count, total claims count, and percentage brand share.`;
+      return 'Show brand share and total share by physician segment. Include segment name, brand claims count, total claims count, and percentage brand share.';
+    }
+
+    const causalIntents: AgentIntent[] = [
+      'CAUSAL_AUTO', 'CAUSAL_CONTRIBUTION', 'CAUSAL_DRIVERS',
+      'CAUSAL_VALIDATION', 'CAUSAL_PIPELINE',
+    ];
+    if (causalIntents.includes(targetAgent)) {
+      return 'Show total dispensed claim count, brand claim count, and generic claim count by physician and month. Include physician_key, month, and all three counts. Limit to 2000 rows.';
     }
 
     return null;

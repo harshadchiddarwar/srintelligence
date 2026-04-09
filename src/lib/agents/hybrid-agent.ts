@@ -8,40 +8,36 @@
  */
 
 /**
- * SarimaAgent — SARIMA time-series forecasting via CORTEX_TESTING.ML.SARIMA_CALCULATE UDTF.
+ * HybridForecastAgent — ensemble hybrid forecasting via
+ * CORTEX_TESTING.ML.FORECAST_HYBRID table-valued function (UDTF).
  *
- * SARIMA (Seasonal ARIMA) is suited for series with strong periodic patterns.
- * Structure mirrors ProphetAgent; only the UDTF name and display metadata differ.
+ * SQL pattern (ALWAYS use TABLE() with OVER (ORDER BY), NEVER CALL):
+ *   SELECT * FROM TABLE(CORTEX_TESTING.ML.FORECAST_HYBRID(
+ *     CURSOR(SELECT date_col, value_col FROM SOURCE_DATA ORDER BY date_col),
+ *     horizon,
+ *     history_months
+ *   )) ORDER BY DS
  *
- * Expected UDTF output columns: DS, YHAT (and optionally YHAT_LOWER, YHAT_UPPER, RESIDUAL).
+ * The UDTF combines multiple forecasting models (Prophet, SARIMA, XGBoost)
+ * into a single ensemble output with weighted averaging.
+ *
+ * Output columns: DS, YHAT, YHAT_LOWER, YHAT_UPPER, MODEL_WEIGHTS (JSON)
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
 import { BaseAgent, type ParsedData, type ValidationResult } from './base-agent';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 
 const DEFAULT_HORIZON = 13;
 const DEFAULT_HISTORY_MONTHS = 24;
 const DEFAULT_DATE_COL = 'WEEK_DATE';
 const DEFAULT_VALUE_COL = 'METRIC_VALUE';
 
-// ---------------------------------------------------------------------------
-// SarimaAgent
-// ---------------------------------------------------------------------------
-
-export class SarimaAgent extends BaseAgent {
-  readonly name = 'sarima';
-  readonly displayName = 'SARIMA Forecast';
+export class HybridForecastAgent extends BaseAgent {
+  readonly name = 'forecast-hybrid';
+  readonly displayName = 'Hybrid Ensemble Forecast';
   readonly description =
-    'Seasonal ARIMA forecasting model; well-suited for time series with strong periodic patterns.';
-  readonly intent: AgentIntent = 'FORECAST_SARIMA';
-
-  // -------------------------------------------------------------------------
-  // validateInput
-  // -------------------------------------------------------------------------
+    'Ensemble hybrid forecasting — combines Prophet, SARIMA, and XGBoost predictions using CORTEX_TESTING.ML.FORECAST_HYBRID.';
+  readonly intent: AgentIntent = 'FORECAST_HYBRID';
 
   validateInput(input: AgentInput): ValidationResult {
     const sourceSQL = input.extraContext?.sourceSQL as string | undefined;
@@ -55,10 +51,6 @@ export class SarimaAgent extends BaseAgent {
     return { valid: true };
   }
 
-  // -------------------------------------------------------------------------
-  // buildSQL
-  // -------------------------------------------------------------------------
-
   buildSQL(input: AgentInput): string {
     const ctx = input.extraContext ?? {};
     const sourceSQL = ctx.sourceSQL as string;
@@ -69,17 +61,13 @@ export class SarimaAgent extends BaseAgent {
 
     return (
       `WITH SOURCE_DATA AS (\n${sourceSQL}\n)\n` +
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.SARIMA_CALCULATE(\n` +
+      `SELECT * FROM TABLE(CORTEX_TESTING.ML.FORECAST_HYBRID(\n` +
       `  CURSOR(SELECT "${dateCol}", "${valueCol}" FROM SOURCE_DATA ORDER BY "${dateCol}"),\n` +
       `  ${horizon},\n` +
       `  ${historyMonths}\n` +
       `)) ORDER BY DS`
     );
   }
-
-  // -------------------------------------------------------------------------
-  // parseResults
-  // -------------------------------------------------------------------------
 
   parseResults(
     rows: Record<string, unknown>[],
@@ -89,7 +77,7 @@ export class SarimaAgent extends BaseAgent {
     if (rows.length === 0) {
       return {
         data: { historical: [], forecast: [], metrics: {} },
-        narrative: 'SARIMA forecast returned no results.',
+        narrative: 'Hybrid forecast returned no results.',
         metadata: { rowCount: 0 },
       };
     }
@@ -102,47 +90,37 @@ export class SarimaAgent extends BaseAgent {
     const forecast = rows.slice(historicalCount);
 
     const metrics = computeAccuracyMetrics(historical);
-    const trendLabel = deriveTrend(forecast[0], forecast[forecast.length - 1]);
 
+    // Extract model weights from first forecast row if available
+    const modelWeights = parseModelWeights(forecast[0]?.['MODEL_WEIGHTS']);
+
+    const trendLabel = deriveTrend(forecast[0], forecast[forecast.length - 1]);
     const narrative =
-      `SARIMA ${horizon}-week forecast: ${trendLabel}. ` +
+      `Hybrid ensemble ${horizon}-week forecast: ${trendLabel}. ` +
       (metrics.mape !== undefined
         ? `Historical MAPE: ${(metrics.mape * 100).toFixed(1)}%.`
-        : 'Accuracy metrics unavailable.');
+        : 'Accuracy metrics unavailable.') +
+      (modelWeights ? ` Ensemble weights: ${formatWeights(modelWeights)}.` : '');
 
     return {
-      data: { historical, forecast, metrics },
+      data: { historical, forecast, metrics, modelWeights },
       narrative,
-      metadata: {
-        horizon,
-        historicalCount,
-        forecastCount: forecast.length,
-        totalRows,
-      },
+      metadata: { horizon, historicalCount, forecastCount: forecast.length, totalRows },
     };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (duplicated locally to keep each agent file self-contained)
+// Helpers
 // ---------------------------------------------------------------------------
 
-interface AccuracyMetrics {
-  mae?: number;
-  mape?: number;
-}
-
-function computeAccuracyMetrics(historical: Record<string, unknown>[]): AccuracyMetrics {
+function computeAccuracyMetrics(historical: Record<string, unknown>[]) {
   const pairs: Array<{ actual: number; predicted: number }> = [];
-
   for (const row of historical) {
     const yhat = toNumber(row['YHAT'] ?? row['yhat']);
     const y = toNumber(row['Y'] ?? row['y']);
-    if (yhat !== null && y !== null) {
-      pairs.push({ actual: y, predicted: yhat });
-    }
+    if (yhat !== null && y !== null) pairs.push({ actual: y, predicted: yhat });
   }
-
   if (pairs.length === 0) return {};
 
   let absErrorSum = 0;
@@ -152,16 +130,28 @@ function computeAccuracyMetrics(historical: Record<string, unknown>[]): Accuracy
   for (const { actual, predicted } of pairs) {
     const err = Math.abs(actual - predicted);
     absErrorSum += err;
-    if (actual !== 0) {
-      absPercErrorSum += err / Math.abs(actual);
-      mapeCount++;
-    }
+    if (actual !== 0) { absPercErrorSum += err / Math.abs(actual); mapeCount++; }
   }
 
   return {
     mae: absErrorSum / pairs.length,
     mape: mapeCount > 0 ? absPercErrorSum / mapeCount : undefined,
   };
+}
+
+function parseModelWeights(raw: unknown): Record<string, number> | null {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw as Record<string, number>;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) as Record<string, number>; } catch { return null; }
+  }
+  return null;
+}
+
+function formatWeights(weights: Record<string, number>): string {
+  return Object.entries(weights)
+    .map(([k, v]) => `${k}=${(v * 100).toFixed(0)}%`)
+    .join(', ');
 }
 
 function deriveTrend(
@@ -172,8 +162,7 @@ function deriveTrend(
   const firstVal = toNumber(first['YHAT'] ?? first['yhat']);
   const lastVal = toNumber(last['YHAT'] ?? last['yhat']);
   if (firstVal === null || lastVal === null) return 'flat';
-  const delta = lastVal - firstVal;
-  const pct = firstVal !== 0 ? (delta / Math.abs(firstVal)) * 100 : 0;
+  const pct = firstVal !== 0 ? ((lastVal - firstVal) / Math.abs(firstVal)) * 100 : 0;
   if (pct > 3) return `upward trend (+${pct.toFixed(1)}%)`;
   if (pct < -3) return `downward trend (${pct.toFixed(1)}%)`;
   return 'relatively flat';
@@ -189,4 +178,4 @@ function toNumber(value: unknown): number | null {
 // Singleton export
 // ---------------------------------------------------------------------------
 
-export const sarimaAgent = new SarimaAgent();
+export const hybridForecastAgent = new HybridForecastAgent();

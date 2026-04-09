@@ -37,20 +37,31 @@ export interface RecordLineageParams {
 export class LineageTracker {
   private static instance: LineageTracker;
 
+  /** Buffered INSERT statements waiting to be flushed to Snowflake. */
+  private readonly writeBuffer: string[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+
   private constructor() {}
 
   static getInstance(): LineageTracker {
-    if (!LineageTracker.instance) {
-      LineageTracker.instance = new LineageTracker();
+    // Survive Next.js HMR module re-evaluation so the buffer isn't lost.
+    const g = globalThis as typeof globalThis & { __sriLineageTracker2?: LineageTracker };
+    if (!g.__sriLineageTracker2) {
+      g.__sriLineageTracker2 = new LineageTracker();
     }
-    return LineageTracker.instance;
+    return g.__sriLineageTracker2;
   }
 
   // ---------------------------------------------------------------------------
-  // Record
+  // Record — synchronous return, background Snowflake write
   // ---------------------------------------------------------------------------
 
-  async record(params: RecordLineageParams): Promise<string> {
+  /**
+   * Records a lineage entry.  Returns the lineageId immediately (synchronous)
+   * and fires the Snowflake INSERT in the background via a 2-second write buffer,
+   * so the response stream is never blocked by lineage I/O.
+   */
+  record(params: RecordLineageParams): string {
     const lineageId = uuidv4();
     const sql = params.executedSQL ?? params.sourceSQL ?? '';
 
@@ -58,7 +69,6 @@ export class LineageTracker {
     const columns = this.extractColumnsFromSQL(sql);
     const filters = this.extractFiltersFromSQL(sql);
 
-    // Build a deterministic fingerprint of the execution
     const fingerprint = createHash('sha256')
       .update(`${params.sessionId}:${params.intent}:${sql}`)
       .digest('hex')
@@ -73,26 +83,11 @@ export class LineageTracker {
 
     const insertSQL = `
       INSERT INTO CORTEX_TESTING.PUBLIC.DATA_LINEAGE (
-        lineage_id,
-        session_id,
-        user_id,
-        semantic_view_id,
-        semantic_view_name,
-        user_question,
-        intent,
-        agent_name,
-        parent_lineage_id,
-        source_sql,
-        executed_sql,
-        tables_referenced,
-        columns_referenced,
-        filters_applied,
-        row_count,
-        execution_time_ms,
-        cache_status,
-        credits_consumed,
-        fingerprint,
-        created_at
+        lineage_id, session_id, user_id, semantic_view_id, semantic_view_name,
+        user_question, intent, agent_name, parent_lineage_id, source_sql,
+        executed_sql, tables_referenced, columns_referenced, filters_applied,
+        row_count, execution_time_ms, cache_status, credits_consumed,
+        fingerprint, created_at
       ) VALUES (
         '${lineageId}',
         '${params.sessionId}',
@@ -117,14 +112,34 @@ export class LineageTracker {
       )
     `;
 
-    try {
-      await executeSQL(insertSQL);
-    } catch (err) {
-      // Lineage recording is non-blocking — log and continue
-      console.error('[LineageTracker] Failed to record lineage:', err);
-    }
-
+    this.enqueue(insertSQL);
     return lineageId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write buffer
+  // ---------------------------------------------------------------------------
+
+  private enqueue(sql: string): void {
+    this.writeBuffer.push(sql);
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flush().catch((e) =>
+          console.error('[LineageTracker] flush failed:', (e as Error).message),
+        );
+      }, 2_000); // batch writes every 2 seconds
+    }
+  }
+
+  private async flush(): Promise<void> {
+    if (this.writeBuffer.length === 0) return;
+    const batch = this.writeBuffer.splice(0);
+    for (const sql of batch) {
+      await executeSQL(sql).catch((e) =>
+        console.error('[LineageTracker] INSERT failed:', (e as Error).message),
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -142,34 +157,28 @@ export class LineageTracker {
   }
 
   private extractColumnsFromSQL(sql: string): string[] {
-    // Extract identifiers in the SELECT clause (before the first FROM)
     const selectMatch = /SELECT\s+([\s\S]+?)\s+FROM/i.exec(sql);
     if (!selectMatch) return [];
 
     const selectClause = selectMatch[1];
     const columns = new Set<string>();
 
-    // Match alias or plain column references: col, table.col, expr AS alias
     const colRegex = /(?:^|,)\s*(?:[\w.]+\s+AS\s+)?([\w]+)\s*(?:,|$)/gi;
     let match: RegExpExecArray | null;
     while ((match = colRegex.exec(selectClause)) !== null) {
       const col = match[1].trim().toUpperCase();
-      if (col !== '*' && col !== 'NULL') {
-        columns.add(col);
-      }
+      if (col !== '*' && col !== 'NULL') columns.add(col);
     }
 
     return Array.from(columns);
   }
 
   private extractFiltersFromSQL(sql: string): string[] {
-    // Extract the WHERE clause content
     const whereMatch = /WHERE\s+([\s\S]+?)(?:GROUP BY|ORDER BY|HAVING|LIMIT|$)/i.exec(sql);
     if (!whereMatch) return [];
 
-    const whereClause = whereMatch[1].trim();
-    // Split on AND/OR to get individual conditions
-    return whereClause
+    return whereMatch[1]
+      .trim()
       .split(/\bAND\b|\bOR\b/i)
       .map((c) => c.trim())
       .filter((c) => c.length > 0 && c.length < 500);
@@ -191,19 +200,15 @@ export class LineageTracker {
     }
   }
 
-  /** Walks the parentLineageId chain to return the full execution history. */
   async getLineageChain(lineageId: string): Promise<LineageRecord[]> {
     const chain: LineageRecord[] = [];
     let currentId: string | undefined = lineageId;
-
     while (currentId) {
       const record = await this.getLineage(currentId);
       if (!record) break;
       chain.unshift(record);
-      // LineageRecord.nodes contains the parent info
-      currentId = undefined; // We'd need a parentLineageId field — use metadata
+      currentId = undefined;
     }
-
     return chain;
   }
 

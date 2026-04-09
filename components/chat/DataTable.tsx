@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { FileSpreadsheet, Maximize2 } from "lucide-react";
+import { FileSpreadsheet, Maximize2, ChevronDown, ChevronUp } from "lucide-react";
 import { TableData } from "@/lib/types";
 import DownloadDialog from "@/components/ui/DownloadDialog";
 import FullscreenOverlay from "@/components/ui/FullscreenOverlay";
@@ -58,6 +58,8 @@ function TableContent({ data }: { data: TableData }) {
 export default function DataTable({ data }: { data: TableData }) {
   const [showCsvDialog, setShowCsvDialog] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const collapsible = data.rows.length > 5;
+  const [collapsed, setCollapsed] = useState(collapsible);
 
   const downloadCSV = (filename: string) => {
     const header = data.headers.join(",");
@@ -73,10 +75,21 @@ export default function DataTable({ data }: { data: TableData }) {
   };
 
   const toolbar = (
-    <div className="flex items-center gap-1 px-2 py-1.5" style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
+    <div className="flex items-center gap-1 px-2 py-1.5" style={{ borderBottom: collapsed ? "none" : "1px solid var(--border)", background: "var(--bg-secondary)" }}>
       <span className="flex-1 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
         {data.headers.length} columns · {data.rows.length} rows
       </span>
+      {collapsible && (
+        <button
+          onClick={() => setCollapsed(v => !v)}
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors hover:bg-black/5"
+          style={{ color: "var(--text-muted)" }}
+          title={collapsed ? "Show table" : "Hide table"}
+        >
+          {collapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+          {collapsed ? "Show" : "Hide"}
+        </button>
+      )}
       <button
         onClick={() => setShowCsvDialog(true)}
         className="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors hover:bg-black/5"
@@ -101,7 +114,7 @@ export default function DataTable({ data }: { data: TableData }) {
     <>
       <div className="overflow-x-auto rounded-lg" style={{ border: "1px solid var(--border)", background: "#ffffff" }}>
         {toolbar}
-        <TableContent data={data} />
+        {!collapsed && <TableContent data={data} />}
       </div>
 
       {showCsvDialog && (

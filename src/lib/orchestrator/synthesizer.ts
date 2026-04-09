@@ -28,6 +28,22 @@ export interface FormattedResponseLocal {
 // Per-intent follow-up templates
 // ---------------------------------------------------------------------------
 
+const CLUSTER_FOLLOW_UPS = [
+  'What are the key traits of cluster 1?',
+  'Show Z-scores for all clusters.',
+  'How many records are in each cluster?',
+  'Which cluster is highest value?',
+  'Export cluster assignments.',
+];
+
+const CAUSAL_FOLLOW_UPS = [
+  'Which driver had the largest impact?',
+  'Run the causal validation tests.',
+  'Generate a narrative summary of these results.',
+  'Compare causal vs correlational drivers.',
+  'What is the confidence level for each finding?',
+];
+
 const FOLLOW_UPS: Record<AgentIntent, string[]> = {
   ANALYST: [
     'Can you break this down by region?',
@@ -64,6 +80,13 @@ const FOLLOW_UPS: Record<AgentIntent, string[]> = {
     'Extend the forecast to 6 months.',
     'What lag features were included?',
   ],
+  FORECAST_HYBRID: [
+    'What weights were assigned to each model?',
+    'Compare Hybrid vs Prophet for this metric.',
+    'Show the ensemble confidence intervals.',
+    'Extend the hybrid forecast to 6 months.',
+    'Which sub-model contributed most to accuracy?',
+  ],
   FORECAST_AUTO: [
     'Which model was selected automatically?',
     'Show the model selection criteria.',
@@ -85,12 +108,65 @@ const FOLLOW_UPS: Record<AgentIntent, string[]> = {
     'Compare to the previous period.',
     'Which segments are underperforming?',
   ],
-  CLUSTER: [
-    'What are the key traits of cluster 1?',
-    'Show Z-scores for all clusters.',
-    'How many customers are in each cluster?',
-    'Which cluster is highest value?',
-    'Export cluster assignments.',
+  CLUSTER: CLUSTER_FOLLOW_UPS,
+  CLUSTER_GM: CLUSTER_FOLLOW_UPS,
+  CLUSTER_DBSCAN: [
+    'How many noise/outlier points were found?',
+    'Adjust the eps parameter and re-run.',
+    ...CLUSTER_FOLLOW_UPS.slice(0, 3),
+  ],
+  CLUSTER_HIERARCHICAL: [
+    'Can I see the dendrogram?',
+    'Change the linkage method to complete.',
+    ...CLUSTER_FOLLOW_UPS.slice(0, 3),
+  ],
+  CLUSTER_KMEANS: CLUSTER_FOLLOW_UPS,
+  CLUSTER_KMEDOIDS: [
+    'Which records are the medoids?',
+    ...CLUSTER_FOLLOW_UPS.slice(0, 4),
+  ],
+  CLUSTER_COMPARE: [
+    'Run the winning clustering algorithm.',
+    'Show silhouette scores for all algorithms.',
+    'How does GMM compare to K-Means here?',
+    'Export the comparison table.',
+    'Which algorithm is best for my use case?',
+  ],
+  CAUSAL_AUTO: CAUSAL_FOLLOW_UPS,
+  CAUSAL_CONTRIBUTION: [
+    'Which driver contributed most positively?',
+    'Which driver contributed most negatively?',
+    'Validate these causal assumptions.',
+    'Generate a narrative from these results.',
+    'Compare this period to the previous one.',
+  ],
+  CAUSAL_DRIVERS: [
+    'Which drivers are statistically significant?',
+    'Show effect sizes for each driver.',
+    'Run validation tests on these findings.',
+    'Generate a narrative summary.',
+    'Which drivers can I act on?',
+  ],
+  CAUSAL_VALIDATION: [
+    'Which tests failed and why?',
+    'What do I need to fix before drawing conclusions?',
+    'Run the causal drivers analysis.',
+    'Show the parallel trends plot.',
+    'What is the recommended next step?',
+  ],
+  CAUSAL_NARRATIVE: [
+    'Can you make this more concise?',
+    'Add recommendations based on these findings.',
+    'Translate this for a non-technical audience.',
+    'Which findings should I prioritize?',
+    'Export this as a report.',
+  ],
+  CAUSAL_PIPELINE: [
+    'Which step of the pipeline took longest?',
+    'Show the contribution analysis results.',
+    'Show the validation test results.',
+    'Generate an executive narrative.',
+    'Re-run with different baseline/target periods.',
   ],
   PIPELINE: [
     'Run this pipeline on a different date range.',
@@ -160,6 +236,16 @@ export class ResponseSynthesizer {
         ].join('\n');
       }
 
+      case 'FORECAST_HYBRID': {
+        return [
+          '### Hybrid Ensemble Forecast',
+          '',
+          base,
+          '',
+          `_Model: Hybrid Ensemble • duration: ${result.durationMs}ms • cache: ${artifact?.cacheStatus ?? 'miss'}_`,
+        ].join('\n');
+      }
+
       case 'FORECAST_COMPARE': {
         return [
           '### Model Comparison',
@@ -180,13 +266,80 @@ export class ResponseSynthesizer {
         ].join('\n');
       }
 
-      case 'CLUSTER': {
+      case 'CLUSTER':
+      case 'CLUSTER_GM':
+      case 'CLUSTER_DBSCAN':
+      case 'CLUSTER_HIERARCHICAL':
+      case 'CLUSTER_KMEANS':
+      case 'CLUSTER_KMEDOIDS': {
+        const algo = intent === 'CLUSTER' ? 'GMM' : intent.replace('CLUSTER_', '');
         return [
-          '### Cluster Profiles',
+          `### ${algo} Cluster Profiles`,
           '',
           base,
           '',
-          `_Clustering complete • duration: ${result.durationMs}ms • cache: ${artifact?.cacheStatus ?? 'miss'}_`,
+          `_Algorithm: ${algo} • duration: ${result.durationMs}ms • cache: ${artifact?.cacheStatus ?? 'miss'}_`,
+        ].join('\n');
+      }
+
+      case 'CLUSTER_COMPARE': {
+        return [
+          '### Clustering Algorithm Comparison',
+          '',
+          base,
+          '',
+          `_All algorithms evaluated • duration: ${result.durationMs}ms_`,
+        ].join('\n');
+      }
+
+      case 'CAUSAL_AUTO':
+      case 'CAUSAL_CONTRIBUTION': {
+        return [
+          '### Causal Contribution Analysis',
+          '',
+          base,
+          '',
+          `_Causal decomposition complete • duration: ${result.durationMs}ms_`,
+        ].join('\n');
+      }
+
+      case 'CAUSAL_DRIVERS': {
+        return [
+          '### Causal Driver Analysis',
+          '',
+          base,
+          '',
+          `_Driver identification complete • duration: ${result.durationMs}ms_`,
+        ].join('\n');
+      }
+
+      case 'CAUSAL_VALIDATION': {
+        return [
+          '### Causal Assumption Validation',
+          '',
+          base,
+          '',
+          `_Validation tests complete • duration: ${result.durationMs}ms_`,
+        ].join('\n');
+      }
+
+      case 'CAUSAL_NARRATIVE': {
+        return [
+          '### Causal Narrative',
+          '',
+          base,
+          '',
+          `_Narrative generated • duration: ${result.durationMs}ms_`,
+        ].join('\n');
+      }
+
+      case 'CAUSAL_PIPELINE': {
+        return [
+          '### Full Causal Inference Pipeline',
+          '',
+          base,
+          '',
+          `_End-to-end pipeline complete • duration: ${result.durationMs}ms_`,
         ].join('\n');
       }
 

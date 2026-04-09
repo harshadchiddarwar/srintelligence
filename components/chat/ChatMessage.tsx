@@ -287,8 +287,8 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
             <InlineMarkdown text={message.content} />
           )}
 
-          {message.tableData && <DataTable data={message.tableData} />}
           {message.chartData && <InlineChart data={message.chartData} />}
+          {message.tableData && <DataTable data={message.tableData} />}
 
           {message.suggestedFollowups && message.suggestedFollowups.length > 0 && (
             <div>

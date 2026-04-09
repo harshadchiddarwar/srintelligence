@@ -1,4 +1,13 @@
 /**
+ * @deprecated Blueprint v3.0 — This SQL-building agent is superseded by the
+ * corresponding named Snowflake Cortex Agent (SRI_FORECAST_AGENT,
+ * SRI_CLUSTERING_AGENT, SRI_META_TREE, or SRI_CAUSAL_INFERENCE_AGENT).
+ * Named agents handle all SQL construction, data preparation, and ML
+ * formatting internally.  This file is kept for reference only and is no
+ * longer invoked by the v3.0 dispatcher or pipeline executor.
+ */
+
+/**
  * ForecastCompareAgent — runs all four forecast models in parallel and produces
  * a comparison table artifact identifying the best-performing model by MAPE.
  *
@@ -12,6 +21,7 @@ import { prophetAgent } from './prophet-agent';
 import { sarimaAgent } from './sarima-agent';
 import { hwAgent } from './hw-agent';
 import { xgboostAgent } from './xgboost-agent';
+import { hybridForecastAgent } from './hybrid-agent';
 import type {
   AgentInput,
   AgentResult,
@@ -41,7 +51,7 @@ export class ForecastCompareAgent {
   readonly name = 'forecast-compare';
   readonly displayName = 'Forecast Model Comparison';
   readonly description =
-    'Runs Prophet, SARIMA, Holt-Winters, and XGBoost in parallel and compares accuracy metrics to identify the best model.';
+    'Runs Prophet, SARIMA, Holt-Winters, XGBoost, and Hybrid Ensemble in parallel and compares accuracy metrics to identify the best model.';
   readonly intent: AgentIntent = 'FORECAST_COMPARE';
 
   // -------------------------------------------------------------------------
@@ -64,14 +74,15 @@ export class ForecastCompareAgent {
     }
 
     // ------------------------------------------------------------------
-    // Run all four models in parallel
+    // Run all five models in parallel
     // ------------------------------------------------------------------
-    const [prophetSettled, sarimaSettled, hwSettled, xgbSettled] =
+    const [prophetSettled, sarimaSettled, hwSettled, xgbSettled, hybridSettled] =
       await Promise.allSettled([
         prophetAgent.execute(input),
         sarimaAgent.execute(input),
         hwAgent.execute(input),
         xgboostAgent.execute(input),
+        hybridForecastAgent.execute(input),
       ]);
 
     const settled = [
@@ -79,6 +90,7 @@ export class ForecastCompareAgent {
       { agent: sarimaAgent, result: sarimaSettled },
       { agent: hwAgent, result: hwSettled },
       { agent: xgboostAgent, result: xgbSettled },
+      { agent: hybridForecastAgent, result: hybridSettled },
     ];
 
     // ------------------------------------------------------------------

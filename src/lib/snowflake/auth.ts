@@ -162,7 +162,7 @@ export class SnowflakeAuthManager {
       `WHERE user_id = '${userId.replace(/'/g, "''")}' LIMIT 1`;
 
     const headers = await this.getAuthHeaders();
-    const warehouse = process.env.SNOWFLAKE_WAREHOUSE ?? 'CORTEX_WH';
+    const warehouse = process.env.SNOWFLAKE_WAREHOUSE;
 
     const response = await fetch(`${BASE_URL}/api/v2/statements`, {
       method: 'POST',

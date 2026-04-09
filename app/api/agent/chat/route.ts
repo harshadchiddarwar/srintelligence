@@ -38,11 +38,10 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  // Always bypass the in-memory agent cache so stale results never mask fresh
-  // Cortex Analyst / Snowflake responses.  The cache TTL is 5 min, but a wrong
-  // result cached before a fix would still be served until it expired.
   const { message } = body;
-  const bypassCache = true;
+  // Cache is enabled by default (repeat queries return in <50ms from memory).
+  // Pass bypassCache: true in the request body to force a fresh Cortex call.
+  const bypassCache = body.bypassCache ?? false;
 
   if (!message?.trim()) {
     return Response.json({ error: 'message is required' }, { status: 400 });
@@ -69,7 +68,9 @@ export async function POST(request: Request): Promise<Response> {
   const switchTarget = parseSwitchCommand(message);
   if (switchTarget) {
     // "switch to X" — find view by display name or id
+    console.time('0c_DISCOVER_VIEWS');
     const views = await discoverSemanticViews(userRole);
+    console.timeEnd('0c_DISCOVER_VIEWS');
     const matched =
       views.find((v) => v.displayName.toLowerCase() === switchTarget.toLowerCase()) ??
       views.find((v) => v.id.toLowerCase() === switchTarget.toLowerCase());
@@ -78,16 +79,22 @@ export async function POST(request: Request): Promise<Response> {
       context.semanticView = matched;
     }
   } else if (body.semanticViewId && !semanticView) {
+    console.time('0b_GET_VIEW_BY_ID');
     semanticView = await getSemanticViewById(body.semanticViewId);
+    console.timeEnd('0b_GET_VIEW_BY_ID');
   }
 
   if (!semanticView) {
+    console.time('0c_DEFAULT_VIEW');
     semanticView = await getDefaultSemanticView(userRole);
+    console.timeEnd('0c_DEFAULT_VIEW');
   }
 
   if (!semanticView) {
     // Last resort: pick first available view
+    console.time('0c_DISCOVER_VIEWS_FALLBACK');
     const views = await discoverSemanticViews(userRole);
+    console.timeEnd('0c_DISCOVER_VIEWS_FALLBACK');
     semanticView = views[0] ?? null;
   }
 

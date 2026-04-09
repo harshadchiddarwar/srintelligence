@@ -48,10 +48,11 @@ export class LineageTracker {
   private constructor() {}
 
   static getInstance(): LineageTracker {
-    if (!LineageTracker.instance) {
-      LineageTracker.instance = new LineageTracker();
+    const g = globalThis as typeof globalThis & { __sriLineageTracker?: LineageTracker };
+    if (!g.__sriLineageTracker) {
+      g.__sriLineageTracker = new LineageTracker();
     }
-    return LineageTracker.instance;
+    return g.__sriLineageTracker;
   }
 
   // -------------------------------------------------------------------------

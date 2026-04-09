@@ -76,7 +76,85 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     pattern: /@Clustering\b/i,
     intent: 'CLUSTER',
     priority: 110,
-    description: 'Explicit: Clustering agent',
+    description: 'Explicit: Clustering agent (auto)',
+  },
+  {
+    pattern: /@Clustering\/GMM\b/i,
+    intent: 'CLUSTER_GM',
+    priority: 110,
+    description: 'Explicit: GMM clustering',
+  },
+  {
+    pattern: /@Clustering\/DBSCAN\b/i,
+    intent: 'CLUSTER_DBSCAN',
+    priority: 110,
+    description: 'Explicit: DBSCAN clustering',
+  },
+  {
+    pattern: /@Clustering\/Hierarchical\b/i,
+    intent: 'CLUSTER_HIERARCHICAL',
+    priority: 110,
+    description: 'Explicit: Hierarchical clustering',
+  },
+  {
+    pattern: /@Clustering\/KMeans\b/i,
+    intent: 'CLUSTER_KMEANS',
+    priority: 110,
+    description: 'Explicit: K-Means clustering',
+  },
+  {
+    pattern: /@Clustering\/KMedoids\b/i,
+    intent: 'CLUSTER_KMEDOIDS',
+    priority: 110,
+    description: 'Explicit: K-Medoids clustering',
+  },
+  {
+    pattern: /@Clustering\/Compare\b/i,
+    intent: 'CLUSTER_COMPARE',
+    priority: 110,
+    description: 'Explicit: Compare all clustering algorithms',
+  },
+  {
+    pattern: /@Forecast\/Hybrid\b/i,
+    intent: 'FORECAST_HYBRID',
+    priority: 110,
+    description: 'Explicit: Hybrid ensemble forecast',
+  },
+  {
+    pattern: /@Causal\b/i,
+    intent: 'CAUSAL_AUTO',
+    priority: 110,
+    description: 'Explicit: Causal inference (auto)',
+  },
+  {
+    pattern: /@Causal\/Contribution\b/i,
+    intent: 'CAUSAL_CONTRIBUTION',
+    priority: 110,
+    description: 'Explicit: Causal contribution analysis',
+  },
+  {
+    pattern: /@Causal\/Drivers\b/i,
+    intent: 'CAUSAL_DRIVERS',
+    priority: 110,
+    description: 'Explicit: Causal driver identification',
+  },
+  {
+    pattern: /@Causal\/Validation\b/i,
+    intent: 'CAUSAL_VALIDATION',
+    priority: 110,
+    description: 'Explicit: Causal assumption validation',
+  },
+  {
+    pattern: /@Causal\/Narrative\b/i,
+    intent: 'CAUSAL_NARRATIVE',
+    priority: 110,
+    description: 'Explicit: Causal narrative generation',
+  },
+  {
+    pattern: /@Causal\/Pipeline\b/i,
+    intent: 'CAUSAL_PIPELINE',
+    priority: 110,
+    description: 'Explicit: Full causal inference pipeline',
   },
   {
     pattern: /@mTree\b/i,
@@ -119,9 +197,91 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     priority: 100,
     description: 'Compare multiple forecasting models',
   },
+  {
+    pattern: /\bhybrid\s+(?:forecast|model)\b|\bhybrid\b.*\bforecast\b/i,
+    intent: 'FORECAST_HYBRID',
+    priority: 100,
+    description: 'Hybrid ensemble forecast',
+  },
 
   // -------------------------------------------------------------------------
-  // Priority 90: Root-cause / driver / metric-tree / clustering
+  // Priority 100: Named clustering algorithms
+  // -------------------------------------------------------------------------
+  {
+    pattern: /\b(?:gaussian\s+mixture|gmm)\b/i,
+    intent: 'CLUSTER_GM',
+    priority: 100,
+    description: 'Gaussian Mixture Model clustering',
+  },
+  {
+    pattern: /\bdbscan\b/i,
+    intent: 'CLUSTER_DBSCAN',
+    priority: 100,
+    description: 'DBSCAN density-based clustering',
+  },
+  {
+    pattern: /\bhierarchical\s+cluster(?:ing)?\b|\bagglomerative\b/i,
+    intent: 'CLUSTER_HIERARCHICAL',
+    priority: 100,
+    description: 'Hierarchical/agglomerative clustering',
+  },
+  {
+    pattern: /\bk[\s-]?means?\b/i,
+    intent: 'CLUSTER_KMEANS',
+    priority: 100,
+    description: 'K-Means clustering',
+  },
+  {
+    pattern: /\bk[\s-]?medoids?\b/i,
+    intent: 'CLUSTER_KMEDOIDS',
+    priority: 100,
+    description: 'K-Medoids clustering',
+  },
+  {
+    pattern:
+      /\b(compare\s+(?:cluster(?:ing)?|segment(?:ation)?)\s+(?:algorithm|model)s?|which\s+cluster(?:ing)?\s+(?:algorithm|method)\s+(?:is\s+)?best|cluster(?:ing)?\s+comparison)\b/i,
+    intent: 'CLUSTER_COMPARE',
+    priority: 100,
+    description: 'Compare all clustering algorithms',
+  },
+
+  // -------------------------------------------------------------------------
+  // Priority 100: Causal inference explicit method keywords
+  // -------------------------------------------------------------------------
+  {
+    pattern: /\bcausal\s+contribution\b|\bcontribution\s+analys(?:is|e)\b/i,
+    intent: 'CAUSAL_CONTRIBUTION',
+    priority: 100,
+    description: 'Causal contribution analysis',
+  },
+  {
+    pattern: /\bcausal\s+driver\b|\bstatistical\s+driver\b/i,
+    intent: 'CAUSAL_DRIVERS',
+    priority: 100,
+    description: 'Causal driver identification',
+  },
+  {
+    pattern:
+      /\bcausal\s+(?:validat|assump|test)\w*\b|\bplacebo\s+test\b|\bdifference[\s-]in[\s-]difference\b|\bDiD\b/i,
+    intent: 'CAUSAL_VALIDATION',
+    priority: 100,
+    description: 'Causal assumption validation',
+  },
+  {
+    pattern: /\bcausal\s+narrative\b|\bexplain\s+the\s+causal\b/i,
+    intent: 'CAUSAL_NARRATIVE',
+    priority: 100,
+    description: 'Causal narrative generation',
+  },
+  {
+    pattern: /\bcausal\s+pipeline\b|\brun\s+(?:full\s+)?causal\b/i,
+    intent: 'CAUSAL_PIPELINE',
+    priority: 100,
+    description: 'Full causal inference pipeline',
+  },
+
+  // -------------------------------------------------------------------------
+  // Priority 90: Root-cause / driver / metric-tree / clustering / causal
   // -------------------------------------------------------------------------
   {
     pattern: /\b(segment|cluster|group(?:ing)?|cohort|partition)\b/i,
@@ -135,6 +295,13 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     intent: 'MTREE',
     priority: 90,
     description: 'Root-cause / driver / metric-tree decomposition',
+  },
+  {
+    pattern:
+      /\b(causal(?:ity|ly)?|causal\s+(?:impact|effect|inference|analysis)|what\s+caused|causal\s+relationship)\b/i,
+    intent: 'CAUSAL_AUTO',
+    priority: 90,
+    description: 'Causal inference analysis',
   },
 
   // -------------------------------------------------------------------------

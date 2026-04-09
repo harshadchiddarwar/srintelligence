@@ -1,4 +1,13 @@
 /**
+ * @deprecated Blueprint v3.0 — This SQL-building agent is superseded by the
+ * corresponding named Snowflake Cortex Agent (SRI_FORECAST_AGENT,
+ * SRI_CLUSTERING_AGENT, SRI_META_TREE, or SRI_CAUSAL_INFERENCE_AGENT).
+ * Named agents handle all SQL construction, data preparation, and ML
+ * formatting internally.  This file is kept for reference only and is no
+ * longer invoked by the v3.0 dispatcher or pipeline executor.
+ */
+
+/**
  * ProphetAgent — time-series forecasting via CORTEX_TESTING.ML.PROPHET_CALCULATE UDTF.
  *
  * Wraps caller-supplied source SQL as a CTE and passes its output through

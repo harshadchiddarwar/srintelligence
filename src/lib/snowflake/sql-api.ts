@@ -15,7 +15,7 @@ import { authManager } from './auth';
 // ---------------------------------------------------------------------------
 
 const BASE_URL = `https://${process.env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com`;
-const WAREHOUSE = process.env.SNOWFLAKE_WAREHOUSE ?? 'CORTEX_WH';
+const WAREHOUSE = process.env.SNOWFLAKE_WAREHOUSE;
 const DATABASE = process.env.SNOWFLAKE_DATABASE ?? 'CORTEX_TESTING';
 const POLL_INTERVAL_MS = 2_000;
 const STATEMENT_TIMEOUT_S = 120;
@@ -86,16 +86,59 @@ interface SnowflakeStatementResponse {
 // Core helpers
 // ---------------------------------------------------------------------------
 
+const DATE_TYPES = new Set(['date', 'timestamp_ntz', 'timestamp_ltz', 'timestamp_tz']);
+
+/** Format a UTC Date as MM/DD/YY */
+function formatDateUTC(d: Date): string {
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const yy = String(d.getUTCFullYear()).slice(-2);
+  return `${mm}/${dd}/${yy}`;
+}
+
+/**
+ * Map raw Snowflake SQL API rows to objects using column metadata.
+ * Date/timestamp columns (identified by rowType.type) are formatted as MM/DD/YY.
+ * Snowflake returns:
+ *   - DATE as epoch-day count string (e.g. "19723")
+ *   - TIMESTAMP_* as epoch-seconds string (e.g. "1704067200.000000000")
+ */
 function buildRows(
-  columnNames: string[],
+  rowType: SnowflakeRowType[],
   rawRows: (string | null)[][],
 ): Record<string, unknown>[] {
+  const dateIndices = new Set(
+    rowType
+      .map((col, idx) => (DATE_TYPES.has(col.type.toLowerCase()) ? idx : -1))
+      .filter((i) => i >= 0),
+  );
+
   return rawRows.map((rawRow) => {
     const record: Record<string, unknown> = {};
-    columnNames.forEach((col, idx) => {
+    rowType.forEach((col, idx) => {
       const raw = rawRow[idx];
-      // Trim leading/trailing whitespace from strings (e.g. TO_VARCHAR format-mask padding)
-      record[col] = typeof raw === "string" ? raw.trim() : (raw ?? null);
+      if (raw == null) {
+        record[col.name] = null;
+        return;
+      }
+      const trimmed = raw.trim();
+      if (dateIndices.has(idx)) {
+        if (col.type.toLowerCase() === 'date') {
+          // Epoch-day count → Date
+          const epochDay = parseInt(trimmed, 10);
+          record[col.name] = !isNaN(epochDay)
+            ? formatDateUTC(new Date(epochDay * 86_400_000))
+            : trimmed;
+        } else {
+          // Epoch-seconds (possibly fractional) → Date
+          const epochSec = parseFloat(trimmed);
+          record[col.name] = !isNaN(epochSec)
+            ? formatDateUTC(new Date(epochSec * 1_000))
+            : trimmed;
+        }
+      } else {
+        record[col.name] = trimmed;
+      }
     });
     return record;
   });
@@ -140,6 +183,7 @@ async function pollForResult(
   signal?: AbortSignal,
 ): Promise<SnowflakeStatementResponse> {
   const url = `${BASE_URL}/api/v2/statements/${handle}`;
+  let pollCount = 0;
 
   for (;;) {
     // Abort-aware sleep: resolves after POLL_INTERVAL_MS or rejects immediately on abort
@@ -158,7 +202,9 @@ async function pollForResult(
       throw new DOMException('Aborted', 'AbortError');
     }
 
+    pollCount++;
     const response = await fetch(url, { method: 'GET', headers, signal });
+    console.log(`SQL_API_POLL_${pollCount}: status=${response.status}`);
 
     if (!response.ok) {
       throw new SnowflakeError(`Async poll failed: HTTP ${response.status}`);
@@ -184,6 +230,7 @@ async function pollForResult(
     }
 
     // SUCCESS or any other terminal state
+    console.log('SQL_API_POLL_COUNT:', pollCount);
     return json;
   }
 }
@@ -222,12 +269,15 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
     resultSetMetaData: { format: 'json' },
   };
 
+  console.time('SQL_API_POST');
   const response = await fetch(`${BASE_URL}/api/v2/statements`, {
     method: 'POST',
     headers: { ...headers, ...extraHeaders },
     signal,
     body: JSON.stringify(requestBody),
   });
+  console.timeEnd('SQL_API_POST');
+  console.log('SQL_API_STATUS:', response.status);
 
   let json: SnowflakeStatementResponse;
 
@@ -250,7 +300,9 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
     signal?.addEventListener('abort', () => {
       cancelSnowflakeStatement(handle, headers).catch(() => {});
     }, { once: true });
+    console.time('SQL_API_POLL');
     json = await pollForResult(handle, headers, signal);
+    console.timeEnd('SQL_API_POLL');
   } else {
     const errorJson = (await response.json().catch(() => ({}))) as SnowflakeStatementResponse;
     throw new SnowflakeError(
@@ -270,9 +322,19 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
     });
   }
 
-  const columnNames = metadata.rowType.map((col) => col.name);
+  const { rowType } = metadata;
+  const columnNames = rowType.map((col) => col.name);
+
+  // Log column schema — tells us which columns Snowflake reports as date/timestamp
+  console.log('[SQL_API] rowType:', rowType.map((c) => `${c.name}:${c.type}`).join(', '));
+
   const primaryData = json.data ?? [];
   let allRows: (string | null)[][] = [...primaryData];
+
+  // Log raw first row so we can see epoch values before conversion
+  if (primaryData[0]) {
+    console.log('[SQL_API] raw row[0]:', JSON.stringify(primaryData[0]));
+  }
 
   // Fetch additional partitions if present
   const partitionInfo = metadata.partitionInfo ?? [];
@@ -287,7 +349,13 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
     }
   }
 
-  const rows = buildRows(columnNames, allRows);
+  const rows = buildRows(rowType, allRows);
+
+  // Log parsed first row so we can confirm date formatting was applied
+  if (rows[0]) {
+    console.log('[SQL_API] parsed row[0]:', JSON.stringify(rows[0]));
+  }
+  console.log('[SQL_API] rowCount:', rows.length);
 
   return {
     columns: columnNames,

@@ -1,11 +1,25 @@
 /**
- * PipelineExecutor — async generator that drives a multi-step agent pipeline,
- * honouring dependency ordering, circuit breaking, and retry logic.
+ * PipelineExecutor — Blueprint v3.0
+ *
+ * Async generator that drives a multi-step agent pipeline, honouring
+ * dependency ordering, circuit breaking, and retry logic.
+ *
+ * v3.0 changes:
+ *   • resolveAgent() is replaced by the AGENT_ROUTING_MAP.  Each step is now
+ *     executed via callCortexAgent() (PATH B) or analystAgent.execute() (PATH A),
+ *     exactly as the single-turn RouteDispatcher does.
+ *   • enrichStepWithPriorResults() injects narrative / SQL / data summaries
+ *     from completed upstream steps into the downstream step message so named
+ *     Cortex Agents have full context.
+ *   • summarizePriorResult() (imported from agent-mapping.ts) formats result
+ *     summaries for context injection.
  */
 
+import { randomUUID } from 'crypto';
 import type {
   AgentIntent,
   AgentResult,
+  AgentArtifact,
   AgentInput,
   PipelineDefinition,
   PipelineStep,
@@ -13,6 +27,8 @@ import type {
 import { ExecutionContext } from './context';
 import { RETRY_CONFIG, classifyError, isRetryable, circuitBreaker } from './error-handling';
 import { analystAgent } from '../agents/analyst-agent';
+import { AGENT_ROUTING_MAP, enrichMessage, summarizePriorResult } from '../agents/agent-mapping';
+import { callCortexAgent } from '../snowflake/cortex-agent-api';
 
 // ---------------------------------------------------------------------------
 // Pipeline event shapes (internal — richer than the type in agent.ts)
@@ -68,32 +84,6 @@ export type PipelineEvent =
   | PipelineDoneEvent;
 
 // ---------------------------------------------------------------------------
-// Lazy agent imports (agents are heavy — only load what we need)
-// ---------------------------------------------------------------------------
-
-async function resolveAgent(intent: AgentIntent) {
-  switch (intent) {
-    case 'ANALYST':
-      return analystAgent;
-    case 'FORECAST_PROPHET':
-    case 'FORECAST_SARIMA':
-    case 'FORECAST_HW':
-    case 'FORECAST_XGB':
-    case 'FORECAST_AUTO': {
-      const { prophetAgent } = await import('../agents/prophet-agent');
-      return prophetAgent;
-    }
-    case 'FORECAST_COMPARE': {
-      // Fallback to prophet for compare — RouteDispatcher handles the real compare flow
-      const { prophetAgent } = await import('../agents/prophet-agent');
-      return prophetAgent;
-    }
-    default:
-      return analystAgent;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Narrative synthesis helper
 // ---------------------------------------------------------------------------
 
@@ -147,7 +137,7 @@ export class PipelineExecutor {
       const depFailed = step.dependsOn.some((depId) => skipped.has(depId));
       if (depFailed) {
         skipped.add(step.stepId);
-        const errorEvent: PipelineStepErrorEvent = {
+        yield {
           type: 'step_error',
           stepId: step.stepId,
           error: `Skipped because dependency failed: ${step.dependsOn.filter((d) => skipped.has(d)).join(', ')}`,
@@ -155,7 +145,6 @@ export class PipelineExecutor {
           skippedDependents: [step.stepId],
           timestamp: Date.now(),
         };
-        yield errorEvent;
         continue;
       }
 
@@ -165,7 +154,7 @@ export class PipelineExecutor {
       );
       if (!depsComplete) {
         skipped.add(step.stepId);
-        const errorEvent: PipelineStepErrorEvent = {
+        yield {
           type: 'step_error',
           stepId: step.stepId,
           error: `Cannot run: unsatisfied dependencies: ${step.dependsOn.filter((d) => !this.context.getResult(d)).join(', ')}`,
@@ -173,7 +162,6 @@ export class PipelineExecutor {
           skippedDependents: [step.stepId],
           timestamp: Date.now(),
         };
-        yield errorEvent;
         continue;
       }
 
@@ -181,7 +169,7 @@ export class PipelineExecutor {
       const breakerKey = `pipeline:${step.agentName}`;
       if (circuitBreaker.isOpen(breakerKey)) {
         skipped.add(step.stepId);
-        const errorEvent: PipelineStepErrorEvent = {
+        yield {
           type: 'step_error',
           stepId: step.stepId,
           error: `Circuit breaker open for agent '${step.agentName}' — too many recent failures.`,
@@ -189,18 +177,16 @@ export class PipelineExecutor {
           skippedDependents: this.findDependents(pipeline, step.stepId),
           timestamp: Date.now(),
         };
-        yield errorEvent;
         continue;
       }
 
       // --- Step start ---
-      const startEvent: PipelineStepStartEvent = {
+      yield {
         type: 'step_start',
         stepId: step.stepId,
         agentName: step.agentName,
         timestamp: Date.now(),
       };
-      yield startEvent;
 
       // --- Execute with retry ---
       let result: AgentResult | null = null;
@@ -233,13 +219,12 @@ export class PipelineExecutor {
       if (result && result.success) {
         this.context.storeResult(step.stepId, result);
         completed += 1;
-        const completeEvent: PipelineStepCompleteEvent = {
+        yield {
           type: 'step_complete',
           stepId: step.stepId,
           result,
           timestamp: Date.now(),
         };
-        yield completeEvent;
       } else {
         circuitBreaker.recordFailure(breakerKey);
         skipped.add(step.stepId);
@@ -250,7 +235,7 @@ export class PipelineExecutor {
         const dependents = this.findDependents(pipeline, step.stepId);
         dependents.forEach((d) => skipped.add(d));
 
-        const errorEvent: PipelineStepErrorEvent = {
+        yield {
           type: 'step_error',
           stepId: step.stepId,
           error: errorMsg,
@@ -258,27 +243,16 @@ export class PipelineExecutor {
           skippedDependents: dependents,
           timestamp: Date.now(),
         };
-        yield errorEvent;
       }
     }
 
     // --- Optional final synthesis ---
     if ((pipeline as PipelineDefinition & { finalSynthesis?: boolean }).finalSynthesis) {
       const narrative = await synthesizeNarrative(this.context, pipeline);
-      const synthesisEvent: PipelineSynthesisEvent = {
-        type: 'synthesis',
-        narrative,
-        timestamp: Date.now(),
-      };
-      yield synthesisEvent;
+      yield { type: 'synthesis', narrative, timestamp: Date.now() };
     }
 
-    const doneEvent: PipelineDoneEvent = {
-      type: 'done',
-      progress: { completed, total },
-      timestamp: Date.now(),
-    };
-    yield doneEvent;
+    yield { type: 'done', progress: { completed, total }, timestamp: Date.now() };
   }
 
   // ---------------------------------------------------------------------------
@@ -290,26 +264,93 @@ export class PipelineExecutor {
     parameters: Record<string, unknown>,
   ): Promise<AgentResult> {
     const input = this.resolveStepInput(step, parameters);
-    const agent = await resolveAgent(step.intent);
-    return agent.execute(input);
+    const route = AGENT_ROUTING_MAP[step.intent];
+
+    // PATH A — cortex_analyst
+    if (route.type === 'cortex_analyst' || !route.cortexAgentName) {
+      return analystAgent.execute(input);
+    }
+
+    // PATH B — cortex_agent (named Snowflake agent)
+    const startMs = Date.now();
+    const cortexRef = route.cortexAgentName;
+
+    // Build enriched message including prior step summaries
+    const enriched = this.enrichStepWithPriorResults(step, input.message);
+
+    const agentMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+      { role: 'user', content: enriched },
+    ];
+
+    const response = await callCortexAgent(cortexRef, agentMessages);
+
+    if (response.error) {
+      return {
+        success: false,
+        error: response.error,
+        durationMs: Date.now() - startMs,
+        retryCount: 0,
+      };
+    }
+
+    const artifact: AgentArtifact = {
+      id: randomUUID(),
+      agentName: cortexRef,
+      intent: step.intent,
+      data: response.data ?? null,
+      sql: response.sql,
+      narrative: response.text,
+      createdAt: Date.now(),
+      lineageId: randomUUID(),
+      cacheStatus: 'miss',
+    };
+
+    return {
+      success: true,
+      artifact,
+      durationMs: Date.now() - startMs,
+      retryCount: 0,
+    };
+  }
+
+  /**
+   * Enrich a step's NL message with summaries from prior completed steps.
+   * This gives named Cortex Agents the context they need when they depend on
+   * upstream results (e.g. cluster assignments feeding a causal agent).
+   */
+  private enrichStepWithPriorResults(step: PipelineStep, baseMessage: string): string {
+    if (step.dependsOn.length === 0) return baseMessage;
+
+    const priorSummaries: string[] = [];
+    let priorSQL: string | undefined;
+    const priorData: Record<string, unknown> = {};
+
+    for (const depId of step.dependsOn) {
+      const depResult = this.context.getResult(depId);
+      if (!depResult?.success) continue;
+
+      const narrative = depResult.artifact?.narrative;
+      const data = depResult.artifact?.data;
+      const sql = depResult.artifact?.sql;
+
+      if (sql && !priorSQL) priorSQL = sql;
+
+      // Merge data fields for intent-specific enrichment hints
+      if (data && typeof data === 'object') {
+        Object.assign(priorData, data);
+      }
+
+      priorSummaries.push(summarizePriorResult(depId, narrative, data));
+    }
+
+    const priorNarrative = priorSummaries.join('\n');
+    return enrichMessage(baseMessage, step.intent, { priorNarrative, priorSQL, priorData });
   }
 
   private resolveStepInput(
     step: PipelineStep,
     parameters: Record<string, unknown>,
   ): AgentInput {
-    // Pull source SQL from a prior step if dependsOn specifies one
-    let extraContext: Record<string, unknown> = { ...(step.params ?? {}) };
-
-    if (step.dependsOn.length > 0) {
-      const parentId = step.dependsOn[0];
-      const parentResult = this.context.getResult(parentId);
-      if (parentResult?.artifact?.sql) {
-        extraContext = { ...extraContext, sourceSQL: parentResult.artifact.sql };
-      }
-    }
-
-    // Apply parameter overrides from the run-time parameters bag
     const resolvedMessage =
       (step.params?.['nlQuery'] as string) ??
       (parameters['nlQuery'] as string) ??
@@ -323,7 +364,7 @@ export class PipelineExecutor {
       semanticView: this.context.semanticView,
       conversationHistory: this.context.conversationHistory,
       userPreferences: this.context.userPreferences,
-      extraContext,
+      extraContext: { ...(step.params ?? {}) },
     };
   }
 

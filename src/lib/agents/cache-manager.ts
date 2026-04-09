@@ -60,10 +60,14 @@ export class CacheManager {
   }
 
   static getInstance(): CacheManager {
-    if (!CacheManager.instance) {
-      CacheManager.instance = new CacheManager();
+    // Use globalThis so the singleton survives Next.js HMR module re-evaluation.
+    // Without this, every hot-reload wipes the in-memory cache and every query
+    // becomes a cold-path Cortex Analyst call again.
+    const g = globalThis as typeof globalThis & { __sriCacheManager?: CacheManager };
+    if (!g.__sriCacheManager) {
+      g.__sriCacheManager = new CacheManager();
     }
-    return CacheManager.instance;
+    return g.__sriCacheManager;
   }
 
   // -------------------------------------------------------------------------

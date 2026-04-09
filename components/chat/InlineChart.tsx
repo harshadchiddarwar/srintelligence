@@ -2,9 +2,11 @@
 
 import { useState } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LabelList,
+  BarChart, Bar, LineChart, Line,
+  XAxis, YAxis, Tooltip, ResponsiveContainer,
+  Cell, LabelList, CartesianGrid,
 } from "recharts";
-import { Download, Maximize2, FileSpreadsheet, Presentation } from "lucide-react";
+import { Maximize2, FileSpreadsheet, Presentation } from "lucide-react";
 import { ChartData } from "@/lib/types";
 import DownloadDialog from "@/components/ui/DownloadDialog";
 import FullscreenOverlay from "@/components/ui/FullscreenOverlay";
@@ -12,23 +14,82 @@ import FullscreenOverlay from "@/components/ui/FullscreenOverlay";
 const COLORS = ["#2891DA", "#34c98b", "#FFA550", "#DC2626"];
 const PPTX_COLORS = ["2891DA", "34c98b", "FFA550", "DC2626"];
 
+/** Detect time-series data by looking for date/period-like name patterns. */
+function isTimeSeries(data: ChartData[]): boolean {
+  if (data.length <= 3) return false;
+  return data.some((d) =>
+    /\d{4}|\d{2}\/\d{2}\/\d{2,4}|\bjan\b|\bfeb\b|\bmar\b|\bapr\b|\bmay\b|\bjun\b|\bjul\b|\baug\b|\bsep\b|\boct\b|\bnov\b|\bdec\b|\bq[1-4]\b/i.test(d.name),
+  );
+}
+
+/** Compact numeric formatter (1,234,567 → 1.2M, 12345 → 12.3K). */
+function fmtValue(v: number): string {
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
 interface ChartBodyProps {
   data: ChartData[];
   height?: number;
 }
 
-function ChartBody({ data, height = 148 }: ChartBodyProps) {
+function ChartBody({ data, height = 200 }: ChartBodyProps) {
+  const timeSeries = isTimeSeries(data);
+
+  if (timeSeries) {
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <LineChart data={data} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis
+            dataKey="name"
+            tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            tickFormatter={fmtValue}
+            width={52}
+          />
+          <Tooltip
+            contentStyle={{ background: "#ffffff", border: "1px solid var(--border)", borderRadius: "8px", fontSize: "12px" }}
+            formatter={(v: unknown) => [fmtValue(Number(v))]}
+          />
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke="#2891DA"
+            strokeWidth={2}
+            dot={data.length <= 30}
+            activeDot={{ r: 4 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    );
+  }
+
   const showLabels = data.length <= 6;
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} barSize={32} margin={{ top: showLabels ? 20 : 4, right: 8, bottom: 0, left: showLabels ? -20 : 0 }}>
+      <BarChart data={data} barSize={32} margin={{ top: showLabels ? 20 : 4, right: 8, bottom: 0, left: 8 }}>
         <XAxis dataKey="name" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false} />
         {!showLabels && (
-          <YAxis tick={{ fill: "var(--text-muted)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${Number(v).toFixed(1)}%`} width={40} />
+          <YAxis
+            tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            tickFormatter={fmtValue}
+            width={52}
+          />
         )}
         <Tooltip
           contentStyle={{ background: "#ffffff", border: "1px solid var(--border)", borderRadius: "8px", fontSize: "12px" }}
-          formatter={(v) => [`${Number(v).toFixed(1)}%`, "Share"]}
+          formatter={(v: unknown) => [fmtValue(Number(v))]}
         />
         <Bar dataKey="value" radius={[4, 4, 0, 0]}>
           {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
@@ -36,7 +97,7 @@ function ChartBody({ data, height = 148 }: ChartBodyProps) {
             <LabelList
               dataKey="value"
               position="top"
-              formatter={(v) => (v != null ? `${Number(v).toFixed(1)}%` : "")}
+              formatter={(v: unknown) => (v != null ? fmtValue(Number(v)) : "")}
               style={{ fill: "var(--text-primary)", fontSize: 11, fontWeight: 600 }}
             />
           )}
@@ -46,10 +107,12 @@ function ChartBody({ data, height = 148 }: ChartBodyProps) {
   );
 }
 
-export default function InlineChart({ data }: { data: ChartData[] }) {
+export default function InlineChart({ data, title }: { data: ChartData[]; title?: string }) {
   const [showPptxDialog, setShowPptxDialog] = useState(false);
   const [showCsvDialog, setShowCsvDialog] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+
+  const chartTitle = title ?? (isTimeSeries(data) ? "Trend Over Time" : "Data Visualization");
 
   const downloadCSV = (filename: string) => {
     const header = "Category,Value";
@@ -69,15 +132,14 @@ export default function InlineChart({ data }: { data: ChartData[] }) {
     pptx.layout = "LAYOUT_WIDE";
     const slide = pptx.addSlide();
 
-    slide.addText("Market Share by Region", {
+    slide.addText(chartTitle, {
       x: 0.5, y: 0.25, w: 9, h: 0.5,
       fontSize: 20, bold: true, color: "111111",
     });
 
-    // Plot actual bar chart using pptxgenjs addChart
     const chartData = [
       {
-        name: "Market Share",
+        name: "Values",
         labels: data.map((d) => d.name),
         values: data.map((d) => d.value),
       },
@@ -107,7 +169,7 @@ export default function InlineChart({ data }: { data: ChartData[] }) {
       <div className="rounded-lg px-4 pt-3 pb-4" style={{ background: "#ffffff", border: "1px solid var(--border)" }}>
         {/* Toolbar */}
         <div className="flex items-center gap-1 mb-1">
-          <span className="flex-1 text-xs font-medium" style={{ color: "var(--text-muted)" }}>Market Share by Region</span>
+          <span className="flex-1 text-xs font-medium" style={{ color: "var(--text-muted)" }}>{chartTitle}</span>
           <button onClick={() => setShowCsvDialog(true)}
             className="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors hover:bg-black/5"
             style={{ color: "var(--text-muted)" }} title="Download chart data as CSV">
@@ -134,7 +196,7 @@ export default function InlineChart({ data }: { data: ChartData[] }) {
         <DownloadDialog defaultName="chart-slide" extension="pptx" onConfirm={downloadPPTX} onClose={() => setShowPptxDialog(false)} />
       )}
       {fullscreen && (
-        <FullscreenOverlay title="Market Share by Region" onClose={() => setFullscreen(false)}>
+        <FullscreenOverlay title={chartTitle} onClose={() => setFullscreen(false)}>
           <ChartBody data={data} height={420} />
         </FullscreenOverlay>
       )}

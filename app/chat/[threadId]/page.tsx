@@ -17,6 +17,18 @@ function emptyThread(id: string, title: string): ChatThread {
 
 // ── Status pill shown while streaming ─────────────────────────────────────────
 function StreamingStatus({ status }: { status: string }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    setElapsed(0);
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const fmt = elapsed >= 60
+    ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+    : `${elapsed}s`;
+
   return (
     <div className="flex items-center gap-2.5">
       <div
@@ -34,6 +46,7 @@ function StreamingStatus({ status }: { status: string }) {
       <div className="flex items-center gap-2 py-2">
         <Loader2 size={13} className="animate-spin" style={{ color: "var(--accent)" }} />
         <span className="text-xs" style={{ color: "var(--text-muted)" }}>{status}</span>
+        <span className="text-xs tabular-nums" style={{ color: "var(--text-muted)", opacity: 0.6 }}>{fmt}</span>
       </div>
     </div>
   );
@@ -92,20 +105,70 @@ function SQLBadge({ sql }: { sql: string }) {
   );
 }
 
+// ── Normalise a row value to string | number ──────────────────────────────────
+function normaliseCell(v: unknown): string | number {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') return v;
+  const str = String(v).trim();
+  // Try to coerce numeric strings (but not date strings like "2024-01")
+  if (str !== '' && !isNaN(Number(str)) && !/[-/]/.test(str)) return Number(str);
+  return str;
+}
+
+// ── Build a { headers, rows } table from an array of objects ─────────────────
+function rowsFromObjectArray(arr: Record<string, unknown>[]): { headers: string[]; rows: (string | number)[][] } {
+  const headers = Object.keys(arr[0] ?? {});
+  const rows = arr.map((row) => headers.map((h) => normaliseCell(row[h])));
+  return { headers, rows };
+}
+
 // ── Map an AgentArtifact to the legacy tableData / chartData fields ────────────
 function artifactToTableData(artifact: AgentArtifact): { headers: string[]; rows: (string | number)[][] } | undefined {
-  const d = artifact.data as Record<string, unknown> | undefined;
-  if (!d) return undefined;
+  const data = artifact.data;
+  if (data === null || data === undefined) return undefined;
 
-  // ANALYST artifact: { results: { headers, rows } }
-  const results = d["results"] as { headers?: string[]; rows?: (string | number)[][] } | undefined;
-  if (results?.headers && results?.rows) {
-    return { headers: results.headers, rows: results.rows };
+  // ── Shape 1: direct array of objects [{ col: val }, ...] ─────────────────
+  // Covers named-agent responses that return rows directly, or the fallback
+  // where analyst-agent.ts stores analystResponse.data as-is.
+  if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object' && data[0] !== null) {
+    return rowsFromObjectArray(data as Record<string, unknown>[]);
   }
 
-  // Flat { headers, rows } shape
+  const d = data as Record<string, unknown>;
+
+  // ── Shape 2: { results: { headers, rows } }  (primary ANALYST shape) ──────
+  const results = d["results"] as
+    | { headers?: string[]; rows?: (string | number)[][] }
+    | Record<string, unknown>[]
+    | undefined;
+
+  if (results && typeof results === 'object' && !Array.isArray(results)) {
+    const r = results as { headers?: string[]; rows?: (string | number)[][] };
+    if (Array.isArray(r.headers) && Array.isArray(r.rows)) {
+      return { headers: r.headers, rows: r.rows };
+    }
+  }
+
+  // ── Shape 3: { results: [{ col: val }, ...] } — array in results key ──────
+  if (Array.isArray(results) && results.length > 0 && typeof results[0] === 'object') {
+    return rowsFromObjectArray(results as Record<string, unknown>[]);
+  }
+
+  // ── Shape 4: flat { headers, rows } ──────────────────────────────────────
   if (Array.isArray(d["headers"]) && Array.isArray(d["rows"])) {
     return { headers: d["headers"] as string[], rows: d["rows"] as (string | number)[][] };
+  }
+
+  // ── Shape 5: { data: [{ col: val }, ...] } ───────────────────────────────
+  const dataArr = d["data"];
+  if (Array.isArray(dataArr) && dataArr.length > 0 && typeof dataArr[0] === 'object' && dataArr[0] !== null) {
+    return rowsFromObjectArray(dataArr as Record<string, unknown>[]);
+  }
+
+  // ── Shape 6: { rows: [{ col: val }, ...] } ───────────────────────────────
+  const rowsArr = d["rows"];
+  if (Array.isArray(rowsArr) && rowsArr.length > 0 && typeof rowsArr[0] === 'object' && rowsArr[0] !== null) {
+    return rowsFromObjectArray(rowsArr as Record<string, unknown>[]);
   }
 
   return undefined;
@@ -124,6 +187,47 @@ function artifactToChartData(artifact: AgentArtifact): Array<{ name: string; val
     }));
   }
 
+  // ANALYST: { results: { headers: string[], rows: (string|number)[][] } }
+  const results = d["results"] as { headers?: string[]; rows?: (string | number)[][] } | undefined;
+  if (results && Array.isArray(results.headers) && Array.isArray(results.rows) && results.rows.length > 0) {
+    const headers = results.headers;
+    const rows = results.rows;
+
+    // Find temporal column (date/month/period/etc.)
+    const temporalIdx = headers.findIndex((h) =>
+      /date|month|week|year|quarter|period|ds|time/i.test(h),
+    );
+
+    // Find first genuinely numeric column (skip formatted strings like *_FORMATTED)
+    const numericIdx = headers.findIndex((h, i) => {
+      if (i === temporalIdx) return false;
+      if (/_formatted$/i.test(h)) return false;
+      const val = rows[0]?.[i];
+      if (typeof val === 'number') return true;
+      if (typeof val === 'string' && val !== '') return !isNaN(Number(val.replace(/,/g, '')));
+      return false;
+    });
+
+    if (numericIdx >= 0) {
+      const nameIdx = temporalIdx >= 0 ? temporalIdx : (numericIdx === 0 ? 1 : 0);
+      // Sort chronologically by temporal column (handles MM/DD/YY format)
+      const parseDateKey = (v: string | number): number => {
+        const s = String(v ?? '');
+        const [mm, dd, yy] = s.split('/');
+        return yy && mm && dd ? parseInt(`20${yy}${mm}${dd}`, 10) : 0;
+      };
+      const sorted = temporalIdx >= 0
+        ? [...rows].sort((a, b) => parseDateKey(a[temporalIdx]) - parseDateKey(b[temporalIdx]))
+        : rows;
+      return sorted.map((row) => ({
+        name: String(row[nameIdx] ?? ''),
+        value: typeof row[numericIdx] === 'number'
+          ? (row[numericIdx] as number)
+          : Number(String(row[numericIdx] ?? '0').replace(/,/g, '')),
+      }));
+    }
+  }
+
   return undefined;
 }
 
@@ -132,8 +236,21 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const analystArtifact = resp.artifacts.find((a) => a.intent === "ANALYST");
   const firstArtifact   = resp.artifacts[0];
 
-  const tableData  = analystArtifact ? artifactToTableData(analystArtifact) : (firstArtifact ? artifactToTableData(firstArtifact) : undefined);
+  let tableData  = analystArtifact ? artifactToTableData(analystArtifact) : (firstArtifact ? artifactToTableData(firstArtifact) : undefined);
   const chartData  = firstArtifact ? artifactToChartData(firstArtifact) : undefined;
+
+  // Sort tableData rows by temporal column oldest → newest (MM/DD/YY format)
+  if (tableData) {
+    const tIdx = tableData.headers.findIndex(h => /date|month|week|year|quarter|period|ds|time/i.test(h));
+    if (tIdx >= 0) {
+      const parseDateKey = (v: string | number): number => {
+        const s = String(v ?? '');
+        const [mm, dd, yy] = s.split('/');
+        return yy && mm && dd ? parseInt(`20${yy}${mm}${dd}`, 10) : 0;
+      };
+      tableData = { ...tableData, rows: [...tableData.rows].sort((a, b) => parseDateKey(a[tIdx]) - parseDateKey(b[tIdx])) };
+    }
+  }
   const sql        = analystArtifact?.sql ?? firstArtifact?.sql;
   const latencyS   = (resp.durationMs / 1000).toFixed(1);
 

@@ -8,6 +8,8 @@ import ForecastCompareArtifact from './ForecastCompareArtifact'
 import DecisionTreeArtifact from './DecisionTreeArtifact'
 import WaterfallArtifact from './WaterfallArtifact'
 import ClusterProfileArtifact from './ClusterProfileArtifact'
+import CausalResultArtifact from './CausalResultArtifact'
+import ClusterCompareArtifact from './ClusterCompareArtifact'
 import {
   BarChart,
   Bar,
@@ -115,6 +117,10 @@ export default function ArtifactRenderer({ artifact }: Props) {
       return <WaterfallArtifact artifact={artifact} />
     case 'cluster_profile':
       return <ClusterProfileArtifact artifact={artifact} />
+    case 'cluster_comparison':
+      return <ClusterCompareArtifact artifact={artifact} />
+    case 'causal':
+      return <CausalResultArtifact artifact={artifact} />
     case 'chart':
       return <GenericChart artifact={artifact} />
     case 'narrative':
@@ -146,19 +152,50 @@ function inferType(
   ) {
     return 'forecast'
   }
+  if (intent === 'FORECAST_HYBRID') return 'forecast'
   if (intent === 'FORECAST_COMPARE') return 'comparison'
   if (intent === 'MTREE') return 'tree'
-  if (intent === 'CLUSTER') return 'cluster_profile'
+  if (
+    intent === 'CLUSTER' ||
+    intent === 'CLUSTER_GM' ||
+    intent === 'CLUSTER_DBSCAN' ||
+    intent === 'CLUSTER_HIERARCHICAL' ||
+    intent === 'CLUSTER_KMEANS' ||
+    intent === 'CLUSTER_KMEDOIDS'
+  ) return 'cluster_profile'
+  if (intent === 'CLUSTER_COMPARE') return 'cluster_comparison'
+  if (
+    intent === 'CAUSAL_AUTO' ||
+    intent === 'CAUSAL_CONTRIBUTION' ||
+    intent === 'CAUSAL_DRIVERS' ||
+    intent === 'CAUSAL_VALIDATION' ||
+    intent === 'CAUSAL_NARRATIVE' ||
+    intent === 'CAUSAL_PIPELINE'
+  ) return 'causal'
 
   // Data shape hints
   if (Array.isArray(data)) return 'table'
   const d = data as Record<string, unknown>
   if ('historical' in d && 'forecast' in d) return 'forecast'
-  if ('models' in d && 'winner' in d) return 'comparison'
+  if ('models' in d && 'winner' in d && 'successCount' in d) {
+    // Could be forecast comparison or cluster comparison
+    if ('algorithms' in d) return 'cluster_comparison'
+    return 'comparison'
+  }
+  if ('drivers' in d && 'type' in d && (d['type'] as string)?.startsWith('causal')) return 'causal'
+  if ('tests' in d && 'type' in d && (d['type'] as string)?.startsWith('causal')) return 'causal'
   if ('drivers' in d) return 'tree'
   if ('items' in d && 'baseline' in d) return 'waterfall'
+  if ('segments' in d && 'algorithm' in d) return 'cluster_profile'
+  if ('algorithms' in d) return 'cluster_comparison'
   if ('segments' in d) return 'cluster_profile'
   if ('sql' in d) return 'sql'
+
+  // AnalystAgent result envelope: { results: { headers, rows } }
+  if ('results' in d && typeof d['results'] === 'object' && d['results'] !== null) {
+    const r = d['results'] as Record<string, unknown>
+    if (Array.isArray(r['headers']) && Array.isArray(r['rows'])) return 'table'
+  }
 
   return 'table'
 }
