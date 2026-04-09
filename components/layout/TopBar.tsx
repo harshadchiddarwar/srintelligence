@@ -64,7 +64,7 @@ export default function TopBar() {
     <header
       className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0"
       style={{
-        background: "var(--bg-secondary)",
+        background: "#F9F8F4",
         borderBottom: "1px solid var(--border)",
       }}
     >
@@ -95,7 +95,7 @@ export default function TopBar() {
             fontSize: "11px",
             fontWeight: 600,
             letterSpacing: "0.10em",
-            color: "var(--text-muted)",
+            color: "#0f172a",
             lineHeight: 1,
             marginTop: "7px",
           }}
