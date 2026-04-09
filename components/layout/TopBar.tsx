@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { Settings, User, LogOut, ChevronDown } from "lucide-react";
+import { Bell, User, LogOut, ChevronDown } from "lucide-react";
 
 function UserMenu() {
   const [open, setOpen] = useState(false);
@@ -109,9 +109,9 @@ export default function TopBar() {
         <button
           className="p-1.5 rounded-lg transition-colors hover:bg-black/7"
           style={{ color: "var(--text-muted)" }}
-          title="Settings"
+          title="Alerts"
         >
-          <Settings size={16} />
+          <Bell size={16} />
         </button>
         <UserMenu />
       </div>
