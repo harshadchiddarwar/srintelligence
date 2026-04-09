@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, ReactNode } from "react";
 import LeftRail from "./LeftRail";
+import { ChatHistoryProvider } from "@/components/providers/ChatHistoryProvider";
 
 const MIN_WIDTH = 100;
 const MAX_WIDTH = 320;
@@ -51,24 +52,26 @@ export default function ResizableLayout({ children }: { children: ReactNode }) {
   const narrow = !collapsed && railWidth < 130;
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* Rail */}
-      <div style={{ width: effectiveWidth, transition: "width 0.18s ease" }} className="shrink-0 overflow-hidden relative">
-        <LeftRail collapsed={collapsed} narrow={narrow} onToggleCollapse={() => setCollapsed((v) => !v)} />
+    <ChatHistoryProvider>
+      <div className="flex flex-1 overflow-hidden">
+        {/* Rail */}
+        <div style={{ width: effectiveWidth, transition: "width 0.18s ease" }} className="shrink-0 overflow-hidden relative">
+          <LeftRail collapsed={collapsed} narrow={narrow} onToggleCollapse={() => setCollapsed((v) => !v)} />
+        </div>
+
+        {/* Invisible drag handle — shows col-resize cursor on hover */}
+        <div
+          ref={handleRef}
+          onMouseDown={onMouseDown}
+          className="w-2 shrink-0 hover:bg-black/8 transition-colors"
+          style={{
+            cursor: collapsed ? "default" : "col-resize",
+            background: "transparent",
+          }}
+        />
+
+        <main className="flex-1 overflow-hidden">{children}</main>
       </div>
-
-      {/* Invisible drag handle — shows col-resize cursor on hover */}
-      <div
-        ref={handleRef}
-        onMouseDown={onMouseDown}
-        className="w-2 shrink-0 hover:bg-black/8 transition-colors"
-        style={{
-          cursor: collapsed ? "default" : "col-resize",
-          background: "transparent",
-        }}
-      />
-
-      <main className="flex-1 overflow-hidden">{children}</main>
-    </div>
+    </ChatHistoryProvider>
   );
 }

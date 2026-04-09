@@ -1,12 +1,43 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Search, BookOpen, Database, ChevronDown } from "lucide-react";
+import { Search, BookOpen, Database, ChevronDown, Loader2 } from "lucide-react";
 import ERDiagram from "@/components/data-explore/ERDiagram";
 import ChatInput from "@/components/chat/ChatInput";
-import { semanticModels, businessRules } from "@/lib/mock-data";
+import { semanticTables, businessRules } from "@/lib/mock-data";
 import { SemanticTable } from "@/lib/types";
+
+// ---------------------------------------------------------------------------
+// Real semantic views fetched from Snowflake
+// ---------------------------------------------------------------------------
+
+interface SemanticView {
+  id: string;
+  displayName: string;
+  description: string;
+  fullyQualifiedName: string;
+  isDefault?: boolean;
+}
+
+// Static schema mapping: view id → tables that belong to it.
+// "cortex_testcase" and "analytics" both map to the real CORTEX_TESTCASE schema.
+const VIEW_SCHEMA: Record<string, SemanticTable[]> = {
+  cortex_testcase: semanticTables,
+  analytics: semanticTables,
+};
+
+function getTablesForView(view: SemanticView): SemanticTable[] {
+  // Try by id first, then by a normalised id derived from the display name
+  const byId = VIEW_SCHEMA[view.id];
+  if (byId) return byId;
+  const normalised = view.displayName.toLowerCase().replace(/\s+/g, "-");
+  return VIEW_SCHEMA[normalised] ?? semanticTables; // fall back to main schema
+}
+
+// ---------------------------------------------------------------------------
+// TableDetail
+// ---------------------------------------------------------------------------
 
 function TableDetail({ table }: { table: SemanticTable }) {
   const [expanded, setExpanded] = useState(false);
@@ -84,28 +115,96 @@ function TableDetail({ table }: { table: SemanticTable }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// DataExplorePage
+// ---------------------------------------------------------------------------
+
 export default function DataExplorePage() {
-  const [activeModelId, setActiveModelId] = useState(semanticModels[0].id);
+  const [views, setViews] = useState<SemanticView[]>([]);
+  const [loadingViews, setLoadingViews] = useState(true);
+  const [activeViewId, setActiveViewId] = useState<string>("");
   const [selectedTable, setSelectedTable] = useState<string>("rx-table");
   const [searchQuery, setSearchQuery] = useState("");
   const router = useRouter();
 
-  const activeModel = semanticModels.find((m) => m.id === activeModelId) ?? semanticModels[0];
+  // Fetch real semantic views from Snowflake on mount
+  useEffect(() => {
+    fetch("/api/semantic-views")
+      .then((r) => r.json())
+      .then((data: { views?: SemanticView[] }) => {
+        const fetched = data.views ?? [];
+        if (fetched.length > 0) {
+          setViews(fetched);
+          const def = fetched.find((v) => v.isDefault) ?? fetched[0];
+          setActiveViewId(def.id);
+        }
+      })
+      .catch(() => {
+        // Fallback to the known real view
+        const fallback: SemanticView = {
+          id: "cortex_testcase",
+          displayName: "Analytics",
+          description: "Rx claims, drug reference, physicians & plan data",
+          fullyQualifiedName: "CORTEX_TESTING.PUBLIC.CORTEX_TESTCASE",
+          isDefault: true,
+        };
+        setViews([fallback]);
+        setActiveViewId(fallback.id);
+      })
+      .finally(() => setLoadingViews(false));
+  }, []);
 
-  // Reset selected table when model changes
-  const handleModelChange = (id: string) => {
-    setActiveModelId(id);
-    const model = semanticModels.find((m) => m.id === id);
-    if (model?.tables.length) setSelectedTable(model.tables[0].id);
+  const activeView = views.find((v) => v.id === activeViewId);
+  const activeTables = activeView ? getTablesForView(activeView) : semanticTables;
+
+  // Reset selected table when view changes
+  const handleViewChange = (id: string) => {
+    setActiveViewId(id);
+    const tables = getTablesForView(views.find((v) => v.id === id) ?? views[0]);
+    if (tables.length > 0) setSelectedTable(tables[0].id);
   };
 
-  const activeTable = activeModel.tables.find((t) => t.id === selectedTable);
+  // ── Search filtering ────────────────────────────────────────────────────────
+  const q = searchQuery.toLowerCase();
 
-  const filteredRules = searchQuery
+  const filteredTables = q
+    ? activeTables.filter(
+        (t) =>
+          t.name.toLowerCase().includes(q) ||
+          t.columns.some(
+            (c) =>
+              c.name.toLowerCase().includes(q) ||
+              c.description.toLowerCase().includes(q) ||
+              c.type.toLowerCase().includes(q),
+          ),
+      )
+    : activeTables;
+
+  // When search narrows the table list and the current selection is no longer
+  // visible, auto-select the first result so the detail panel shows something.
+  const visibleIds = new Set(filteredTables.map((t) => t.id));
+  const activeTableId = visibleIds.has(selectedTable)
+    ? selectedTable
+    : (filteredTables[0]?.id ?? selectedTable);
+
+  const activeTable = activeTables.find((t) => t.id === activeTableId);
+
+  // Also narrow columns inside the detail panel when a query is active.
+  const filteredDetailCols = q && activeTable
+    ? activeTable.columns.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.description.toLowerCase().includes(q) ||
+          c.type.toLowerCase().includes(q),
+      )
+    : activeTable?.columns ?? [];
+
+  const filteredRules = q
     ? businessRules.filter(
         (r) =>
-          r.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          r.definition.toLowerCase().includes(searchQuery.toLowerCase())
+          r.name.toLowerCase().includes(q) ||
+          r.definition.toLowerCase().includes(q) ||
+          r.details.some((d) => d.toLowerCase().includes(q)),
       )
     : businessRules;
 
@@ -116,35 +215,55 @@ export default function DataExplorePage() {
     >
       <div className="px-5 py-4 flex flex-col gap-4 w-full">
 
-        {/* Semantic model dropdown */}
+        {/* Semantic view selector */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <Database size={14} style={{ color: "var(--text-muted)" }} />
             <span className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>Semantic Model:</span>
           </div>
-          <div className="relative">
-            <select
-              value={activeModelId}
-              onChange={(e) => handleModelChange(e.target.value)}
-              className="appearance-none rounded-lg px-3 py-2 pr-8 text-sm font-medium outline-none transition-colors cursor-pointer"
-              style={{
-                background: "#ffffff",
-                border: "1px solid var(--border)",
-                color: "var(--text-primary)",
-              }}
+
+          {loadingViews ? (
+            <div className="flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+              <Loader2 size={13} className="animate-spin" />
+              <span className="text-sm">Loading…</span>
+            </div>
+          ) : views.length > 1 ? (
+            <div className="relative">
+              <select
+                value={activeViewId}
+                onChange={(e) => handleViewChange(e.target.value)}
+                className="appearance-none rounded-lg px-3 py-2 pr-8 text-sm font-medium outline-none transition-colors cursor-pointer"
+                style={{
+                  background: "#ffffff",
+                  border: "1px solid var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {views.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.displayName}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown
+                size={13}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                style={{ color: "var(--text-muted)" }}
+              />
+            </div>
+          ) : (
+            /* Single view — show as a badge instead of a dropdown */
+            <div
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
+              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
             >
-              {semanticModels.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              size={13}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
-              style={{ color: "var(--text-muted)" }}
-            />
-          </div>
+              <Database size={12} style={{ color: "#2891DA" }} />
+              {activeView?.displayName ?? "Analytics"}
+              <span className="text-xs ml-1" style={{ color: "var(--text-muted)" }}>
+                {activeView?.fullyQualifiedName ?? ""}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Search bar */}
@@ -173,10 +292,10 @@ export default function DataExplorePage() {
             style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}
           >
             <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-              {activeModel.name}
+              {activeView?.displayName ?? "Analytics"}
             </span>
             <span className="text-xs px-2 py-0.5 rounded-full ml-1" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
-              {activeModel.tables.length} tables
+              {activeTables.length} tables
             </span>
             <span className="ml-auto text-xs" style={{ color: "var(--text-muted)" }}>
               Click a table to view details
@@ -184,10 +303,15 @@ export default function DataExplorePage() {
           </div>
           <div className="p-4" style={{ background: "#ffffff" }}>
             <ERDiagram
-              tables={activeModel.tables}
-              selectedTable={selectedTable}
+              tables={filteredTables}
+              selectedTable={activeTableId}
               onSelectTable={setSelectedTable}
             />
+            {filteredTables.length === 0 && q && (
+              <p className="text-xs text-center py-6" style={{ color: "var(--text-muted)" }}>
+                No tables match &ldquo;{searchQuery}&rdquo;
+              </p>
+            )}
           </div>
         </div>
 
@@ -196,8 +320,15 @@ export default function DataExplorePage() {
           <div>
             <p className="text-xs font-medium mb-2" style={{ color: "var(--text-muted)" }}>
               Table Detail: {activeTable.name}
+              {q && filteredDetailCols.length !== activeTable.columns.length && (
+                <span className="ml-2" style={{ color: "var(--accent)" }}>
+                  — {filteredDetailCols.length} of {activeTable.columns.length} columns match
+                </span>
+              )}
             </p>
-            <TableDetail table={activeTable} />
+            <TableDetail
+              table={q ? { ...activeTable, columns: filteredDetailCols.length > 0 ? filteredDetailCols : activeTable.columns } : activeTable}
+            />
           </div>
         )}
 
@@ -240,7 +371,7 @@ export default function DataExplorePage() {
           </div>
         </div>
 
-        {/* Inline chat — no prompt text */}
+        {/* Inline chat */}
         <div className="pb-4">
           <ChatInput
             placeholder="Ask a question about this data..."

@@ -1,6 +1,5 @@
 "use client"
 
-import { Sparkles } from 'lucide-react'
 import type { ConversationMessage } from '../../types/agent'
 import ArtifactRenderer from '../artifacts/ArtifactRenderer'
 import CacheBadge from './CacheBadge'
@@ -77,9 +76,15 @@ export default function MessageRenderer({ message, onFollowup }: Props) {
 
   return (
     <div className="flex items-start gap-3">
-      {/* AI Avatar */}
-      <div className="shrink-0 mt-0.5 flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 shadow-sm">
-        <Sparkles size={14} className="text-white" />
+      {/* AI Avatar — gradient circle, two white sparkles */}
+      <div
+        className="shrink-0 mt-0.5 flex h-8 w-8 items-center justify-center rounded-full"
+        style={{ background: "linear-gradient(135deg, #2891DA 0%, #C8956A 100%)", boxShadow: "0 1px 3px rgba(0,0,0,0.18)" }}
+      >
+        <svg width="19" height="19" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z" fill="white" />
+          <path d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z" fill="white" />
+        </svg>
       </div>
 
       {/* Content */}

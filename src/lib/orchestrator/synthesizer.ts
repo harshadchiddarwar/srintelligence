@@ -142,12 +142,7 @@ export class ResponseSynthesizer {
 
     switch (intent) {
       case 'ANALYST': {
-        const rowCount = Array.isArray(artifact?.data) ? artifact.data.length : 0;
-        return [
-          base,
-          '',
-          `_${rowCount.toLocaleString()} row${rowCount !== 1 ? 's' : ''} returned • cache: ${artifact?.cacheStatus ?? 'miss'} • ${result.durationMs}ms_`,
-        ].join('\n');
+        return base;
       }
 
       case 'FORECAST_PROPHET':

@@ -5,34 +5,87 @@ import AgentActivityBar from "./AgentActivityBar";
 import DataTable from "./DataTable";
 import InlineChart from "./InlineChart";
 
-// Gradient sparkle avatar — white circle, one large + one small sparkle filled with brand gradient
+// ---------------------------------------------------------------------------
+// AI Avatar — gradient circle, two white sparkles (large + small)
+// ---------------------------------------------------------------------------
+
 function AIAvatar() {
   return (
     <div
       className="w-7 h-7 rounded-full shrink-0 mt-0.5 flex items-center justify-center"
-      style={{ background: "#ffffff", border: "1.5px solid #E0E0E0", boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}
+      style={{
+        background: "linear-gradient(135deg, #2891DA 0%, #C8956A 100%)",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
+      }}
     >
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="sg2" x1="0" y1="0" x2="16" y2="16" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor="#2891DA" />
-            <stop offset="100%" stopColor="#FFA550" />
-          </linearGradient>
-        </defs>
-        {/* Large sparkle — 4-arm star, dominant, centered-left */}
+      <svg width="17" height="17" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        {/* Large sparkle — 4-arm star, dominates the circle */}
         <path
-          d="M6.5 1.5 L7.6 5.4 L11.5 6.5 L7.6 7.6 L6.5 11.5 L5.4 7.6 L1.5 6.5 L5.4 5.4Z"
-          fill="url(#sg2)"
+          d="M6.5 1 L8.1 6.4 L13.5 8 L8.1 9.6 L6.5 15 L4.9 9.6 L0 8 L4.9 6.4 Z"
+          fill="white"
         />
-        {/* Small sparkle — compact 4-arm star, upper-right corner */}
+        {/* Small sparkle — upper-right, clearly secondary */}
         <path
-          d="M13 4.5 L13.55 6.2 L15 6.5 L13.55 6.8 L13 8.5 L12.45 6.8 L11 6.5 L12.45 6.2Z"
-          fill="url(#sg2)"
+          d="M13.5 1.5 L14 3 L15.5 3.5 L14 4 L13.5 5.5 L13 4 L11.5 3.5 L13 3 Z"
+          fill="white"
         />
       </svg>
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Inline markdown renderer — handles **bold**, _italic_, bullet lists
+// ---------------------------------------------------------------------------
+
+function renderInline(text: string): React.ReactNode {
+  const parts = text.split(/(\*\*[^*]+\*\*|_[^_]+_)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={i} className="font-semibold" style={{ color: "var(--text-primary)" }}>
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("_") && part.endsWith("_")) {
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    return part;
+  });
+}
+
+function InlineMarkdown({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <div className="flex flex-col gap-0.5">
+      {lines.map((line, li) => {
+        // Bullet list lines
+        if (line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ")) {
+          return (
+            <div key={li} className="flex items-start gap-2">
+              <span className="mt-1 shrink-0" style={{ color: "var(--text-muted)" }}>•</span>
+              <span className="text-sm leading-relaxed" style={{ color: "var(--text-primary)" }}>
+                {renderInline(line.replace(/^[\s\-*]+/, ""))}
+              </span>
+            </div>
+          );
+        }
+        // Empty line → small spacer
+        if (line.trim() === "") return <div key={li} className="h-1" />;
+        return (
+          <p key={li} className="text-sm leading-relaxed" style={{ color: "var(--text-primary)" }}>
+            {renderInline(line)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ChatMessage
+// ---------------------------------------------------------------------------
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -68,9 +121,10 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
         <AIAvatar />
 
         <div className="flex flex-col gap-3 flex-1 min-w-0">
-          <p className="text-sm leading-relaxed" style={{ color: "var(--text-primary)" }}>
-            {message.content}
-          </p>
+          {/* Narrative text with markdown rendering */}
+          {message.content && (
+            <InlineMarkdown text={message.content} />
+          )}
 
           {message.tableData && <DataTable data={message.tableData} />}
           {message.chartData && <InlineChart data={message.chartData} />}

@@ -1,8 +1,11 @@
 /**
- * Snowflake Cortex Analyst REST API client.
+ * Snowflake Cortex Agent client — calls SRI_ANALYST_AGENT via the named
+ * agent REST endpoint.
  *
- * Uses the `semantic_view` parameter (NOT semantic_model_file).
- * Endpoint: POST /api/v2/cortex/analyst/message
+ * Endpoint: POST /api/v2/databases/{db}/schemas/{schema}/agents/{name}:run
+ *
+ * The named agent has the semantic view and instructions already configured
+ * in Snowflake, so we only pass the conversation messages.
  */
 
 import { authManager } from './auth';
@@ -12,6 +15,10 @@ import { authManager } from './auth';
 // ---------------------------------------------------------------------------
 
 const BASE_URL = `https://${process.env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com`;
+const AGENT_DB = 'CORTEX_TESTING';
+const AGENT_SCHEMA = 'ML';
+const AGENT_NAME = 'SRI_ANALYST_AGENT';
+const SNOWFLAKE_ROLE = process.env.SNOWFLAKE_ROLE ?? 'APP_SVC_ROLE';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -26,42 +33,30 @@ export interface AnalystResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Cortex Analyst API request/response shapes
+// Internal message shapes
 // ---------------------------------------------------------------------------
 
-interface AnalystContentBlock {
-  type: string;
-  text?: string;
-  statement?: string;
-  suggestions?: string[];
-}
-
+// Cortex Analyst messages use role 'analyst'; named-agent endpoint uses 'assistant'
 interface AnalystMessage {
   role: 'user' | 'analyst';
-  content: AnalystContentBlock[];
+  content: Array<{ type: string; text?: string; statement?: string; suggestions?: string[] }>;
 }
 
-interface AnalystApiResponse {
-  request_id?: string;
-  message?: {
-    role: string;
-    content: AnalystContentBlock[];
-  };
-  error?: {
-    message?: string;
-    code?: string;
-  };
+interface AgentMessage {
+  role: 'user' | 'assistant';
+  content: Array<{ type: 'text'; text: string }>;
 }
 
 // ---------------------------------------------------------------------------
-// Public function
+// Public function (signature kept identical so callers need no changes)
 // ---------------------------------------------------------------------------
 
 /**
- * Call the Snowflake Cortex Analyst API.
+ * Call SRI_ANALYST_AGENT on Snowflake.
  *
  * @param params.question            - The natural language question.
- * @param params.semanticView        - Fully-qualified semantic view name.
+ * @param params.semanticView        - Kept for API compatibility; the named
+ *                                     agent already knows its semantic view.
  * @param params.conversationHistory - Optional prior conversation turns.
  */
 export async function callCortexAnalyst(params: {
@@ -69,75 +64,344 @@ export async function callCortexAnalyst(params: {
   semanticView: string;
   conversationHistory?: AnalystMessage[];
 }): Promise<AnalystResponse> {
-  const { question, semanticView, conversationHistory = [] } = params;
+  const { question, conversationHistory = [] } = params;
 
-  const headers = await authManager.getAuthHeaders();
+  // Build base headers and add the role header required for tool calls
+  const baseHeaders = await authManager.getAuthHeaders();
+  const headers: Record<string, string> = {
+    ...baseHeaders,
+    'X-Snowflake-Role': SNOWFLAKE_ROLE,
+    // Override Accept to signal we can receive an SSE stream
+    Accept: 'application/json, text/event-stream',
+  };
 
-  const userTurn: AnalystMessage = {
+  // Convert 'analyst' role → 'assistant' for the named-agent endpoint
+  const agentHistory: AgentMessage[] = conversationHistory.map((m) => ({
+    role: m.role === 'analyst' ? 'assistant' : 'user',
+    content: [
+      {
+        type: 'text' as const,
+        text:
+          m.content
+            .filter((b) => b.type === 'text' && b.text)
+            .map((b) => b.text ?? '')
+            .join('\n') || '(no content)',
+      },
+    ],
+  }));
+
+  const userTurn: AgentMessage = {
     role: 'user',
     content: [{ type: 'text', text: question }],
   };
 
-  const requestBody = {
-    messages: [...conversationHistory, userTurn],
-    semantic_view: semanticView,
-  };
+  const messages: AgentMessage[] = [...agentHistory, userTurn];
 
-  const response = await fetch(`${BASE_URL}/api/v2/cortex/analyst/message`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(requestBody),
-  });
+  const agentUrl = `${BASE_URL}/api/v2/databases/${AGENT_DB}/schemas/${AGENT_SCHEMA}/agents/${AGENT_NAME}:run`;
 
-  if (!response.ok) {
-    let errorMessage = `Cortex Analyst request failed: HTTP ${response.status}`;
-    try {
-      const errJson = (await response.json()) as AnalystApiResponse;
-      if (errJson.error?.message) {
-        errorMessage = errJson.error.message;
-      }
-    } catch {
-      // ignore JSON parse error; use the status-based message
-    }
+  let response: Response;
+  try {
+    response = await fetch(agentUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ messages, stream: true }),
+    });
+  } catch (fetchErr) {
     return {
       text: '',
       suggestions: [],
-      error: errorMessage,
-      requestId: undefined,
+      error: `Network error calling SRI_ANALYST_AGENT: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`,
     };
   }
 
-  const json = (await response.json()) as AnalystApiResponse;
+  if (!response.ok) {
+    let errorMessage = `SRI_ANALYST_AGENT request failed: HTTP ${response.status}`;
+    try {
+      const rawText = await response.text();
+      try {
+        const errJson = JSON.parse(rawText) as Record<string, unknown>;
+        const msg =
+          (errJson['message'] as string | undefined) ??
+          ((errJson['error'] as Record<string, string> | undefined)?.['message']) ??
+          rawText;
+        if (msg) errorMessage = `SRI_ANALYST_AGENT ${response.status}: ${msg}`;
+      } catch {
+        if (rawText.trim()) errorMessage = `SRI_ANALYST_AGENT ${response.status}: ${rawText.trim()}`;
+      }
+    } catch {
+      // ignore; keep status-based message
+    }
+    return { text: '', suggestions: [], error: errorMessage };
+  }
 
-  const requestId = json.request_id;
-  const contentBlocks = json.message?.content ?? [];
+  // ---------------------------------------------------------------------------
+  // Parse the SSE / JSON response
+  // ---------------------------------------------------------------------------
+  const contentType = response.headers.get('content-type') ?? '';
+
+  if (contentType.includes('text/event-stream')) {
+    return parseSSEStream(response);
+  }
+
+  // Non-streaming JSON fallback
+  try {
+    const json = (await response.json()) as Record<string, unknown>;
+    return extractFromJsonResponse(json);
+  } catch {
+    const raw = await response.text().catch(() => '');
+    return { text: raw, suggestions: [] };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SSE stream parser
+// ---------------------------------------------------------------------------
+
+async function parseSSEStream(response: Response): Promise<AnalystResponse> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return { text: '', suggestions: [], error: 'No response body from SRI_ANALYST_AGENT' };
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+  let extractedSql: string | undefined;
+  const suggestions: string[] = [];
+
+  // Track current SSE event (multi-line SSE: event: + data:)
+  let currentEventType = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split on newlines; keep the last (potentially incomplete) segment
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const raw of lines) {
+        const line = raw.trimEnd(); // preserve leading spaces (SSE allows them)
+
+        // Blank line = end of SSE event block
+        if (line === '') {
+          currentEventType = '';
+          continue;
+        }
+
+        if (line.startsWith('event:')) {
+          currentEventType = line.slice(6).trim();
+          continue;
+        }
+
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trimStart();
+          if (data === '[DONE]') continue;
+
+          try {
+            const json = JSON.parse(data) as Record<string, unknown>;
+            const chunk = extractTextChunk(json, currentEventType);
+            if (chunk) fullText += chunk;
+
+            const sql = extractSqlFromEvent(json, currentEventType);
+            if (sql && !extractedSql) extractedSql = sql;
+
+            // Collect suggestions
+            const sug = extractSuggestions(json);
+            if (sug.length) suggestions.push(...sug);
+          } catch {
+            // Not JSON — could be a plain-text delta, append as-is
+            if (data && currentEventType === 'response.text.delta') {
+              fullText += data;
+            }
+          }
+        }
+        // Lines starting with ':' are SSE comments — ignore
+      }
+    }
+  } catch (streamErr) {
+    // Partial result is better than nothing
+    if (!fullText) {
+      return {
+        text: '',
+        suggestions: [],
+        error: `Stream read error: ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`,
+      };
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // Attempt to pull SQL from markdown code blocks in the final text
+  if (!extractedSql) {
+    extractedSql = extractSqlFromText(fullText) ?? undefined;
+  }
+
+  // Remove SQL code blocks from the display narrative so they don't appear twice
+  const displayText = extractedSql
+    ? fullText.replace(/```sql[\s\S]*?```/gi, '').trim()
+    : fullText.trim();
+
+  return {
+    text: displayText || fullText.trim(),
+    sql: extractedSql,
+    suggestions,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Non-streaming JSON response extractor
+// ---------------------------------------------------------------------------
+
+function extractFromJsonResponse(json: Record<string, unknown>): AnalystResponse {
+  // Try common shapes
+  const message = json['message'] as Record<string, unknown> | undefined;
+  const content = (message?.['content'] ?? json['content']) as
+    | Array<Record<string, unknown>>
+    | undefined;
 
   let text = '';
   let sql: string | undefined;
-  const suggestions: string[] = [];
 
-  for (const block of contentBlocks) {
-    switch (block.type) {
-      case 'text':
-        if (block.text) {
-          text += (text ? '\n' : '') + block.text;
-        }
-        break;
-      case 'sql':
-        if (block.statement) {
-          sql = block.statement;
-        }
-        break;
-      case 'suggestions':
-        if (Array.isArray(block.suggestions)) {
-          suggestions.push(...block.suggestions);
-        }
-        break;
-      default:
-        // Unknown block type — ignore gracefully
-        break;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block['type'] === 'text' && typeof block['text'] === 'string') {
+        text += block['text'];
+      }
+      if (block['type'] === 'sql' && typeof block['statement'] === 'string') {
+        sql = block['statement'];
+      }
+    }
+  } else if (typeof json['text'] === 'string') {
+    text = json['text'];
+  }
+
+  if (!sql && text) {
+    sql = extractSqlFromText(text) ?? undefined;
+  }
+
+  const displayText = sql ? text.replace(/```sql[\s\S]*?```/gi, '').trim() : text.trim();
+
+  return { text: displayText || text, sql, suggestions: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Per-event chunk extractors
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the text delta from a parsed SSE data JSON object.
+ * Handles both Anthropic-style (content_block_delta) and Snowflake-style
+ * (response.text.delta / response.output_text / plain text fields).
+ */
+function extractTextChunk(event: Record<string, unknown>, eventType: string): string {
+  // ── Anthropic streaming format ──────────────────────────────────────────
+  // {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+  if (event['type'] === 'content_block_delta') {
+    const delta = event['delta'] as Record<string, unknown> | undefined;
+    if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string') {
+      return delta['text'];
     }
   }
 
-  return { text, sql, suggestions, requestId };
+  // ── Snowflake event-in-JSON format ─────────────────────────────────────
+  // {"event":"response.text.delta","data":{"delta":"..."|"text":"..."}}
+  const embeddedEvent = (event['event'] as string | undefined) ?? eventType;
+
+  if (embeddedEvent === 'response.text.delta' || embeddedEvent === 'message.delta') {
+    const data = event['data'] as Record<string, unknown> | undefined;
+    if (data) {
+      if (typeof data['delta'] === 'string') return data['delta'];
+      if (typeof data['text'] === 'string') return data['text'];
+      // Nested: {"delta":{"text":"..."}}
+      const inner = data['delta'] as Record<string, unknown> | undefined;
+      if (inner && typeof inner['text'] === 'string') return inner['text'];
+    }
+    // Or directly on the event object
+    if (typeof event['delta'] === 'string') return event['delta'];
+    if (typeof event['text'] === 'string') return event['text'];
+  }
+
+  // Snowflake "output_text" events
+  if (embeddedEvent === 'response.output_text.delta') {
+    const data = event['data'] as Record<string, unknown> | undefined;
+    if (typeof data?.['delta'] === 'string') return data['delta'];
+    if (typeof event['delta'] === 'string') return event['delta'];
+  }
+
+  return '';
+}
+
+/**
+ * Try to extract SQL from tool-result events.
+ */
+function extractSqlFromEvent(
+  event: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  const embeddedEvent = (event['event'] as string | undefined) ?? eventType;
+
+  if (embeddedEvent === 'response.tool_result') {
+    const data = event['data'] as Record<string, unknown> | undefined;
+
+    // Cortex Analyst tool result carries { sql: "...", text: "..." }
+    const result = (data?.['result'] ?? data?.['output']) as
+      | Record<string, unknown>
+      | string
+      | undefined;
+
+    if (typeof result === 'string') {
+      return extractSqlFromText(result);
+    }
+
+    if (result && typeof result === 'object') {
+      if (typeof result['sql'] === 'string') return result['sql'];
+      if (typeof result['statement'] === 'string') return result['statement'];
+      // Nested: { content: [{ type: 'sql', statement: '...' }] }
+      const contentArr = result['content'] as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(contentArr)) {
+        for (const b of contentArr) {
+          if (b['type'] === 'sql' && typeof b['statement'] === 'string') return b['statement'];
+        }
+      }
+    }
+  }
+
+  // Anthropic tool result block
+  if (event['type'] === 'tool_result' || event['type'] === 'tool_use') {
+    const input = event['input'] as Record<string, unknown> | undefined;
+    if (input && typeof input['sql'] === 'string') return input['sql'];
+  }
+
+  return null;
+}
+
+/**
+ * Extract follow-up suggestions from the event if any.
+ */
+function extractSuggestions(event: Record<string, unknown>): string[] {
+  const data = event['data'] as Record<string, unknown> | undefined;
+  const suggestions = (data?.['suggestions'] ?? event['suggestions']) as
+    | string[]
+    | undefined;
+  return Array.isArray(suggestions) ? suggestions : [];
+}
+
+// ---------------------------------------------------------------------------
+// SQL extraction from markdown text
+// ---------------------------------------------------------------------------
+
+function extractSqlFromText(text: string): string | null {
+  // ```sql ... ```
+  const sqlBlock = text.match(/```sql\s*([\s\S]+?)\s*```/i);
+  if (sqlBlock?.[1]) return sqlBlock[1].trim();
+
+  // ``` SELECT ... ``` (unlabelled code block starting with a SELECT keyword)
+  const selectBlock = text.match(/```\s*(SELECT[\s\S]+?)\s*```/i);
+  if (selectBlock?.[1]) return selectBlock[1].trim();
+
+  return null;
 }

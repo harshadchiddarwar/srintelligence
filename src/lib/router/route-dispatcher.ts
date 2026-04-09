@@ -502,7 +502,11 @@ export class RouteDispatcher {
       intent,
       agentName,
       executedSQL: result.artifact?.sql,
-      rowCount: Array.isArray(result.artifact?.data) ? result.artifact.data.length : undefined,
+      rowCount: (() => {
+        const d = result.artifact?.data as Record<string, unknown> | undefined;
+        const rows = (d?.['results'] as { rows?: unknown[] } | undefined)?.rows;
+        return Array.isArray(rows) ? rows.length : undefined;
+      })(),
       executionTimeMs: now() - startMs,
       cacheStatus: result.artifact?.cacheStatus ?? 'miss',
       creditsConsumed: costEstimate.credits,

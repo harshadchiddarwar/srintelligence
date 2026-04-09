@@ -18,6 +18,18 @@ export default function RootLayout({
       <body className="h-full flex flex-col overflow-hidden" style={{ background: "var(--bg-primary)" }}>
         <TopBar />
         <ResizableLayout>{children}</ResizableLayout>
+        <footer
+          className="shrink-0 flex items-center justify-center px-4"
+          style={{
+            height: "28px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-secondary)",
+          }}
+        >
+          <p style={{ fontSize: "11px", color: "var(--text-muted)", letterSpacing: "0.01em" }}>
+            Agents can make mistakes, double-check responses.
+          </p>
+        </footer>
       </body>
     </html>
   );

@@ -2,22 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Settings, User, ChevronRight, LogOut, ChevronDown } from "lucide-react";
-
-function getBreadcrumb(pathname: string): string[] {
-  if (pathname === "/chat" || pathname === "/") return [];
-  if (pathname.startsWith("/chat/")) return ["Thread"];
-  if (pathname === "/data-explore") return ["Data Explore"];
-  if (pathname === "/workflows") return ["Workflows"];
-  if (pathname.startsWith("/workflows/") && pathname.endsWith("/edit"))
-    return ["Workflows", "Payer Segmentation Pipeline"];
-  if (pathname.startsWith("/workflows/") && pathname.includes("/run"))
-    return ["Workflows", "Payer Segmentation Pipeline", "Run #14"];
-  if (pathname.startsWith("/workflows/"))
-    return ["Workflows", "Payer Segmentation Pipeline"];
-  return [];
-}
+import { Settings, User, LogOut, ChevronDown } from "lucide-react";
 
 function UserMenu() {
   const [open, setOpen] = useState(false);
@@ -52,10 +37,7 @@ function UserMenu() {
             boxShadow: "0 4px 20px rgba(0,0,0,0.10)",
           }}
         >
-          <div
-            className="px-3 py-2.5"
-            style={{ borderBottom: "1px solid var(--border)" }}
-          >
+          <div className="px-3 py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
             <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
               Harshad Chiddarwar
             </p>
@@ -78,42 +60,52 @@ function UserMenu() {
 }
 
 export default function TopBar() {
-  const pathname = usePathname();
-  const breadcrumbs = getBreadcrumb(pathname);
-
   return (
     <header
       className="flex items-center justify-between px-5 shrink-0"
       style={{
-        height: "56px",
+        height: "64px",
         background: "var(--bg-secondary)",
         borderBottom: "1px solid var(--border)",
       }}
     >
-      {/* Logo + breadcrumbs */}
-      <div className="flex items-center gap-2">
-        <Link href="/chat" className="flex items-center" style={{ display: "inline-flex", alignItems: "baseline" }}>
-          <span className="brand-gradient font-bold text-xl tracking-tight leading-none">SRIntelligence</span>
-          <span className="brand-gradient" style={{ fontSize: "10px", fontWeight: 400, marginLeft: "1px", lineHeight: 1 }}>™</span>
-        </Link>
-
-        {breadcrumbs.map((crumb, i) => (
-          <span key={i} className="flex items-center gap-2">
-            <ChevronRight size={14} style={{ color: "var(--text-muted)" }} />
-            <span
-              className="text-sm"
-              style={{
-                color:
-                  i === breadcrumbs.length - 1
-                    ? "var(--text-secondary)"
-                    : "var(--text-muted)",
-              }}
-            >
-              {crumb}
-            </span>
-          </span>
-        ))}
-      </div>
+      {/* Logo */}
+      {/*
+        Set fontSize on the Link so em-units on the <sup> resolve against 22px.
+        The ™ gets its OWN brand-gradient class (its own background-clip:text context),
+        so the gradient animates on it independently but with the same keyframe timing
+        → the two elements look like one continuous gradient.
+        verticalAlign "0.6em" = 0.6 × sup-font-size(11px) = 6.6px above baseline,
+        which is 30% of the parent 22px — same ratio as on the home heading (30%).
+      */}
+      <Link
+        href="/chat"
+        className="flex flex-col gap-0"
+        style={{ textDecoration: "none" }}
+      >
+        <div
+          className="flex items-baseline gap-0 font-bold tracking-tight"
+          style={{ fontSize: "22px", lineHeight: 1.15 }}
+        >
+          <span className="brand-gradient">SRIntelligence</span>
+          <sup
+            className="brand-gradient"
+            style={{ fontSize: "0.5em", fontWeight: 500, verticalAlign: "0.6em", lineHeight: 1, marginLeft: "1px" }}
+          >™</sup>
+        </div>
+        <span
+          style={{
+            fontSize: "8.5px",
+            fontWeight: 600,
+            letterSpacing: "0.10em",
+            color: "var(--text-muted)",
+            lineHeight: 1,
+            marginTop: "7px",
+          }}
+        >
+          STRATEGIC RESEARCH INSIGHTS, INC.
+        </span>
+      </Link>
 
       {/* Right controls */}
       <div className="flex items-center gap-2">

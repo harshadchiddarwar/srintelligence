@@ -66,6 +66,17 @@ function rowToSemanticViewRef(row: Record<string, unknown>): SemanticViewRef {
   };
 }
 
+/** Hard-coded fallback when the registry table has not yet been created. */
+const FALLBACK_VIEW: SemanticViewRef = {
+  id: 'cortex_testcase',
+  displayName: 'Analytics',
+  description: 'Rx claims, drug reference, physicians & plan data',
+  fullyQualifiedName: 'CORTEX_TESTING.PUBLIC.CORTEX_TESTCASE',
+  allowedRoles: [],
+  isDefault: true,
+  tags: [],
+};
+
 async function loadViewsFromSnowflake(userRole: string): Promise<SemanticViewRef[]> {
   const sql = `
     SELECT
@@ -81,17 +92,29 @@ async function loadViewsFromSnowflake(userRole: string): Promise<SemanticViewRef
     ORDER BY display_name ASC
   `;
 
-  const result = await executeSQL(sql, userRole);
+  try {
+    // Do not pass userRole — the PAT already authenticates as the correct role.
+    // Passing a role would create a 2-statement request that conflicts with
+    // Snowflake's default statement count of 1.
+    const result = await executeSQL(sql);
 
-  // Filter on the application side to check role membership
-  const upperRole = userRole.toUpperCase();
-  return result.rows
-    .map(rowToSemanticViewRef)
-    .filter(
-      (v) =>
-        v.allowedRoles.length === 0 ||
-        v.allowedRoles.some((r) => r.toUpperCase() === upperRole),
-    );
+    if (result.rows.length === 0) return [FALLBACK_VIEW];
+
+    // Filter on the application side to check role membership
+    const upperRole = userRole.toUpperCase();
+    const filtered = result.rows
+      .map(rowToSemanticViewRef)
+      .filter(
+        (v) =>
+          v.allowedRoles.length === 0 ||
+          v.allowedRoles.some((r) => r.toUpperCase() === upperRole),
+      );
+
+    return filtered.length > 0 ? filtered : [FALLBACK_VIEW];
+  } catch {
+    // SEMANTIC_VIEW_REGISTRY table not yet created — use hardcoded fallback
+    return [FALLBACK_VIEW];
+  }
 }
 
 // ---------------------------------------------------------------------------

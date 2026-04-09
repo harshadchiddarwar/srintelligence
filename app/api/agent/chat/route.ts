@@ -38,7 +38,11 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { message, bypassCache = false } = body;
+  // Always bypass the in-memory agent cache so stale results never mask fresh
+  // Cortex Analyst / Snowflake responses.  The cache TTL is 5 min, but a wrong
+  // result cached before a fix would still be served until it expired.
+  const { message } = body;
+  const bypassCache = true;
 
   if (!message?.trim()) {
     return Response.json({ error: 'message is required' }, { status: 400 });
@@ -53,7 +57,14 @@ export async function POST(request: Request): Promise<Response> {
     : new ExecutionContext({ sessionId, userId, userRole });
 
   // Resolve semantic view
-  let semanticView: import('../../../../src/types/agent').SemanticViewRef | null = context.semanticView ?? null;
+  // Note: ExecutionContext defaults semanticView to { fullyQualifiedName: '' }, so we must
+  // also treat an empty fullyQualifiedName as "not yet resolved".
+  const hasView = (v: typeof context.semanticView | null) =>
+    v != null && v.fullyQualifiedName.length > 0;
+
+  let semanticView: import('../../../../src/types/agent').SemanticViewRef | null = hasView(context.semanticView)
+    ? context.semanticView
+    : null;
 
   const switchTarget = parseSwitchCommand(message);
   if (switchTarget) {

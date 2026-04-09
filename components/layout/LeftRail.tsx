@@ -6,9 +6,9 @@ import {
   MessageSquare, Search, Zap, Plus, Pencil, Trash2, Check,
   PanelLeftClose, PanelLeftOpen, ChevronDown, ChevronRight,
 } from "lucide-react";
-import { chatThreads as initialThreads } from "@/lib/mock-data";
 import { clsx } from "clsx";
 import { useState } from "react";
+import { useChatHistory } from "@/components/providers/ChatHistoryProvider";
 
 interface LeftRailProps {
   collapsed?: boolean;
@@ -52,7 +52,7 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
   const pathname = usePathname();
   const isChat = pathname.startsWith("/chat");
 
-  const [threads, setThreads] = useState(initialThreads);
+  const { threads, deleteThread, renameThread } = useChatHistory();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -73,8 +73,7 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
   };
 
   const commitRename = (id: string) => {
-    if (renameValue.trim())
-      setThreads((prev) => prev.map((t) => (t.id === id ? { ...t, title: renameValue.trim() } : t)));
+    if (renameValue.trim()) renameThread(id, renameValue.trim());
     setRenamingId(null);
   };
 
@@ -211,7 +210,7 @@ export default function LeftRail({ collapsed = false, narrow = false, onToggleCo
                           <Pencil size={11} />
                         </button>
                         <button
-                          onClick={(e) => { e.preventDefault(); setThreads((prev) => prev.filter((x) => x.id !== t.id)); }}
+                          onClick={(e) => { e.preventDefault(); deleteThread(t.id); }}
                           className="p-1 rounded hover:bg-black/5 transition-colors"
                           style={{ color: "var(--text-muted)" }}
                           title="Delete"

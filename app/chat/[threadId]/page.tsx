@@ -1,26 +1,63 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { useParams, useSearchParams } from "next/navigation";
-import { Pin, Sparkles, AlertCircle, ChevronDown } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { useParams } from "next/navigation";
+import { useChatHistory } from "@/components/providers/ChatHistoryProvider";
+import { saveThreadMessages, loadThreadMessages } from "@/lib/chat-history";
+import { Pin, Sparkles, AlertCircle, ChevronDown, CheckCircle, Loader2 } from "lucide-react";
 import ChatInput from "@/components/chat/ChatInput";
 import ChatMessageComponent from "@/components/chat/ChatMessage";
 import { ChatMessage, ChatThread } from "@/lib/types";
-
-// ── Cortex Analyst history entry (mirrors server-side type) ──────────────────
-interface CortexEntry {
-  role: "user" | "analyst";
-  content: Array<{ type: string; text?: string; statement?: string }>;
-}
+import type { DispatchEvent, FormattedResponse, AgentArtifact } from "@/src/types/agent";
 
 // ── Build a fresh empty thread ────────────────────────────────────────────────
 function emptyThread(id: string, title: string): ChatThread {
   return { id, title, date: new Date().toLocaleDateString(), messages: [] };
 }
 
-// ── SQL collapsible (shown in agent activity) ─────────────────────────────────
+// ── Status pill shown while streaming ─────────────────────────────────────────
+function StreamingStatus({ status }: { status: string }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <div
+        className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+        style={{
+          background: "linear-gradient(135deg, #2891DA, #FFA550)",
+          boxShadow: "0 1px 4px rgba(40,145,218,0.25)",
+        }}
+      >
+        <Sparkles size={13} color="white" />
+      </div>
+      <div className="flex items-center gap-2 py-2">
+        <Loader2 size={13} className="animate-spin" style={{ color: "var(--accent)" }} />
+        <span className="text-xs" style={{ color: "var(--text-muted)" }}>{status}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Collapsible SQL badge ──────────────────────────────────────────────────────
 function SQLBadge({ sql }: { sql: string }) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    const finish = () => { setCopied(true); setTimeout(() => setCopied(false), 1500); };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(sql).then(finish).catch(() => {
+        // Fallback for browsers that block clipboard in non-secure/iframe context
+        try {
+          const el = document.createElement("textarea");
+          el.value = sql; el.style.position = "fixed"; el.style.opacity = "0";
+          document.body.appendChild(el); el.select();
+          document.execCommand("copy");
+          document.body.removeChild(el);
+          finish();
+        } catch { /* silently ignore */ }
+      });
+    }
+  };
+
   return (
     <div className="mt-2">
       <button
@@ -32,45 +69,167 @@ function SQLBadge({ sql }: { sql: string }) {
         <ChevronDown size={11} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
       </button>
       {open && (
-        <pre
-          className="mt-1 p-3 rounded-lg text-xs overflow-x-auto"
-          style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)", maxHeight: 200 }}
-        >
-          {sql}
-        </pre>
+        <div className="relative mt-1">
+          <pre
+            className="p-3 rounded-lg text-xs overflow-x-auto"
+            style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)", maxHeight: 220, fontFamily: "monospace" }}
+          >
+            {sql}
+          </pre>
+          <button
+            onClick={copy}
+            className="absolute top-2 right-2 text-xs px-2 py-0.5 rounded flex items-center gap-1"
+            style={{ background: "var(--bg-secondary)", color: "var(--text-muted)", border: "1px solid var(--border)" }}
+          >
+            {copied ? <><CheckCircle size={9} /> Copied</> : "Copy"}
+          </button>
+        </div>
       )}
     </div>
   );
 }
 
+// ── Map an AgentArtifact to the legacy tableData / chartData fields ────────────
+function artifactToTableData(artifact: AgentArtifact): { headers: string[]; rows: (string | number)[][] } | undefined {
+  const d = artifact.data as Record<string, unknown> | undefined;
+  if (!d) return undefined;
+
+  // ANALYST artifact: { results: { headers, rows } }
+  const results = d["results"] as { headers?: string[]; rows?: (string | number)[][] } | undefined;
+  if (results?.headers && results?.rows) {
+    return { headers: results.headers, rows: results.rows };
+  }
+
+  // Flat { headers, rows } shape
+  if (Array.isArray(d["headers"]) && Array.isArray(d["rows"])) {
+    return { headers: d["headers"] as string[], rows: d["rows"] as (string | number)[][] };
+  }
+
+  return undefined;
+}
+
+function artifactToChartData(artifact: AgentArtifact): Array<{ name: string; value: number }> | undefined {
+  const d = artifact.data as Record<string, unknown> | undefined;
+  if (!d) return undefined;
+
+  // Forecast: { historical: [{date, actual}], forecast: [{date, forecast}] }
+  const forecast = d["forecast"] as Array<{ date?: string; ds?: string; forecast?: number; yhat?: number }> | undefined;
+  if (forecast?.length) {
+    return forecast.slice(-12).map((r) => ({
+      name: String(r.date ?? r.ds ?? ""),
+      value: Number(r.forecast ?? r.yhat ?? 0),
+    }));
+  }
+
+  return undefined;
+}
+
+// ── Build ChatMessage from FormattedResponse ───────────────────────────────────
+function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMessage; sql: string | undefined } {
+  const analystArtifact = resp.artifacts.find((a) => a.intent === "ANALYST");
+  const firstArtifact   = resp.artifacts[0];
+
+  const tableData  = analystArtifact ? artifactToTableData(analystArtifact) : (firstArtifact ? artifactToTableData(firstArtifact) : undefined);
+  const chartData  = firstArtifact ? artifactToChartData(firstArtifact) : undefined;
+  const sql        = analystArtifact?.sql ?? firstArtifact?.sql;
+  const latencyS   = (resp.durationMs / 1000).toFixed(1);
+
+  // Map intent to a human-readable label (no "Cortex" exposure)
+  const intentLabel: Record<string, string> = {
+    ANALYST:           "SRI Analytics Engine",
+    FORECAST_PROPHET:  "SRI Forecast · Prophet",
+    FORECAST_SARIMA:   "SRI Forecast · SARIMA",
+    FORECAST_HW:       "SRI Forecast · Holt-Winters",
+    FORECAST_XGBOOST:  "SRI Forecast · XGBoost",
+    FORECAST_AUTO:     "SRI Forecast · Auto",
+    FORECAST_COMPARE:  "SRI Forecast Comparison",
+    CLUSTER_GMM:       "SRI Clustering · GMM",
+    CLUSTER_KMEANS:    "SRI Clustering · K-Means",
+    CLUSTER_AUTO:      "SRI Clustering · Auto",
+    MTREE:             "SRI mTree™ Analytics",
+    CAUSAL:            "SRI Causal Inference",
+    PIPELINE:          "SRI Multi-Agent Pipeline",
+    UNKNOWN:           "SRI Analytics Engine",
+  };
+
+  const msg: ChatMessage = {
+    id,
+    role: "agent",
+    content: resp.narrative || "Analysis complete.",
+    agentActivity: {
+      masterAgent: "SRIntelligence™ Master Agent",
+      routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",
+      latency: `${latencyS}s`,
+    },
+    tableData:          tableData ?? undefined,
+    chartData:          chartData ?? undefined,
+    suggestedFollowups: resp.suggestions ?? [],
+  };
+
+  return { msg, sql };
+}
+
+// ── SSE line parser ────────────────────────────────────────────────────────────
+function parseSSELine(line: string): DispatchEvent | null {
+  if (!line.startsWith("data: ")) return null;
+  try {
+    return JSON.parse(line.slice(6)) as DispatchEvent;
+  } catch {
+    return null;
+  }
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function ThreadPage() {
-  const params = useParams();
-  const searchParams = useSearchParams();
+  const params   = useParams();
   const threadId = params.threadId as string;
 
-  // ── Thread state ────────────────────────────────────────────────────────────
-  const [thread, setThread] = useState<ChatThread>(() =>
-    emptyThread(threadId, "New conversation")
-  );
-  const [thinking, setThinking] = useState(false);
-  const [error, setError]       = useState<string | null>(null);
-  const bottomRef               = useRef<HTMLDivElement>(null);
+  const [thread,  setThread]  = useState<ChatThread>(() => emptyThread(threadId, "New conversation"));
+  const [streaming, setStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("Analyzing…");
+  const [error,   setError]   = useState<string | null>(null);
+  const [sqlMap,  setSqlMap]  = useState<Record<string, string>>({});
+  const [savingWf, setSavingWf] = useState(false);
+  const [savedWf,  setSavedWf]  = useState(false);
 
-  // ── Cortex conversation history (multi-turn) ────────────────────────────────
-  const cortexHistory = useRef<CortexEntry[]>([]);
+  const sessionIdRef    = useRef<string>(threadId);
+  const bottomRef       = useRef<HTMLDivElement>(null);
+  const { upsertThread, threads } = useChatHistory();
+  // Track whether we've persisted this thread yet (avoids calling upsertThread
+  // inside a setState updater, which React disallows).
+  const hasPersistedRef = useRef(false);
+  const titleRef        = useRef("");
 
-  // ── SQL map: msgId → sql string ─────────────────────────────────────────────
-  const [sqlMap, setSqlMap] = useState<Record<string, string>>({});
-
-  // ── Auto-scroll ─────────────────────────────────────────────────────────────
+  // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [thread.messages, thinking]);
+  }, [thread.messages, streaming]);
 
-  // ── Fire initial query from home page (via sessionStorage) ──────────────────
+  // Load persisted messages when navigating to an existing thread
   useEffect(() => {
-    const key = `pendingQuery:${threadId}`;
+    const saved = loadThreadMessages(threadId);
+    if (saved && saved.messages.length > 0) {
+      hasPersistedRef.current = true;
+      titleRef.current = saved.title;
+      setThread({ id: threadId, title: saved.title, date: new Date().toLocaleDateString(), messages: saved.messages });
+      setSqlMap(saved.sqlMap ?? {});
+    } else {
+      // No saved messages — at least restore the title from the left-rail context
+      const knownTitle = threads.find((t) => t.id === threadId)?.title;
+      if (knownTitle) setThread((prev) => ({ ...prev, title: knownTitle }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
+
+  // Persist messages to localStorage whenever they change
+  useEffect(() => {
+    if (thread.messages.length === 0) return;
+    saveThreadMessages(threadId, thread.title, thread.messages, sqlMap);
+  }, [thread.messages, thread.title, sqlMap, threadId]);
+
+  // Fire pending query from home page
+  useEffect(() => {
+    const key     = `pendingQuery:${threadId}`;
     const pending = sessionStorage.getItem(key);
     if (pending) {
       sessionStorage.removeItem(key);
@@ -79,88 +238,153 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  // ── Submit handler ────────────────────────────────────────────────────────
-  const handleSubmit = async (query: string) => {
+  // ── Core submit handler: POST → SSE stream ─────────────────────────────────
+  const handleSubmit = useCallback(async (query: string) => {
     setError(null);
 
-    // Add user message immediately
     const userMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      role: "user",
+      id:      `msg-${Date.now()}`,
+      role:    "user",
       content: query,
     };
+
+    // Persist to left-rail history on the first message (outside setState)
+    if (!hasPersistedRef.current) {
+      hasPersistedRef.current = true;
+      titleRef.current = query.slice(0, 60);
+      upsertThread(threadId, titleRef.current);
+    }
+
     setThread((prev) => ({
       ...prev,
-      title: prev.messages.length === 0 ? query.slice(0, 60) : prev.title,
+      title:    prev.messages.length === 0 ? query.slice(0, 60) : prev.title,
       messages: [...prev.messages, userMsg],
     }));
-    setThinking(true);
+
+    setStreaming(true);
+    setStreamStatus("Routing query…");
+
+    const agentMsgId = `msg-${Date.now()}-a`;
 
     try {
-      const res = await fetch("/api/cortex", {
-        method: "POST",
+      const res = await fetch("/api/agent/chat", {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query,
-          history: cortexHistory.current,
+          message:   query,
+          sessionId: sessionIdRef.current,
         }),
       });
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(errBody.error ?? res.statusText);
+      // Capture session ID for multi-turn
+      const returnedSession = res.headers.get("X-Session-Id");
+      if (returnedSession) sessionIdRef.current = returnedSession;
+
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(errText || `HTTP ${res.status}`);
       }
 
-      const data = await res.json() as {
-        content: string;
-        sql?: string | null;
-        sqlError?: string | null;
-        tableData?: { headers: string[]; rows: (string | number)[][] } | null;
-        chartData?: Array<{ name: string; value: number }> | null;
-        suggestedFollowups?: string[];
-        latency: string;
-        analystMessage?: CortexEntry;
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buffer  = "";
+
+      // Intent label map for status messages
+      const agentLabel: Record<string, string> = {
+        ANALYST:           "SRI Analytics Engine",
+        FORECAST_PROPHET:  "Forecast · Prophet",
+        FORECAST_SARIMA:   "Forecast · SARIMA",
+        FORECAST_HW:       "Forecast · Holt-Winters",
+        FORECAST_XGBOOST:  "Forecast · XGBoost",
+        FORECAST_AUTO:     "Forecast · Auto",
+        FORECAST_COMPARE:  "Forecast Comparison",
+        CLUSTER_GMM:       "Clustering · GMM",
+        CLUSTER_KMEANS:    "Clustering · K-Means",
+        CLUSTER_AUTO:      "Clustering · Auto",
+        MTREE:             "mTree™",
+        CAUSAL:            "Causal Inference",
+        PIPELINE:          "Multi-Agent Pipeline",
       };
 
-      // Update Cortex history for next turn
-      cortexHistory.current = [
-        ...cortexHistory.current,
-        { role: "user", content: [{ type: "text", text: query }] },
-        ...(data.analystMessage ? [data.analystMessage] : []),
-      ];
+      let finalResponse: FormattedResponse | null = null;
 
-      const agentMsgId = `msg-${Date.now()}-a`;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      // Store SQL separately so we can show it in the collapsible
-      if (data.sql) {
-        setSqlMap((prev) => ({ ...prev, [agentMsgId]: data.sql! }));
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const event = parseSSELine(line.trim());
+          if (!event) continue;
+
+          switch (event.type) {
+            case "ROUTING":
+              setStreamStatus("Routing query…");
+              break;
+            case "AGENT_START":
+              setStreamStatus(`Running ${agentLabel[event.intent ?? ""] ?? event.agentName ?? "agent"}…`);
+              break;
+            case "AGENT_COMPLETE":
+              setStreamStatus("Synthesizing response…");
+              break;
+            case "SYNTHESIS_START":
+              setStreamStatus("Generating narrative…");
+              break;
+            case "SYNTHESIS_COMPLETE": {
+              // payload shape is { result: FormattedResponse }
+              const p = event.payload as { result?: FormattedResponse } | FormattedResponse;
+              finalResponse = ("result" in p && p.result) ? p.result : (p as FormattedResponse);
+              break;
+            }
+            case "ERROR":
+              throw new Error(event.error ?? "Unknown agent error");
+          }
+        }
       }
 
-      const agentMsg: ChatMessage = {
-        id: agentMsgId,
-        role: "agent",
-        content: data.sqlError
-          ? `${data.content}\n\n⚠️ SQL execution error: ${data.sqlError}`
-          : data.content,
-        agentActivity: {
-          masterAgent: "Master Agent",
-          routedTo: "SRI Analytics Engine",
-          latency: data.latency,
-        },
-        tableData: data.tableData ?? undefined,
-        chartData: data.chartData ?? undefined,
-        suggestedFollowups: data.suggestedFollowups ?? [],
-      };
+      if (!finalResponse) {
+        throw new Error("No response received from the agent");
+      }
 
-      setThread((prev) => ({
-        ...prev,
-        messages: [...prev.messages, agentMsg],
-      }));
+      const { msg, sql } = buildAgentMessage(agentMsgId, finalResponse);
+
+      if (sql) {
+        setSqlMap((prev) => ({ ...prev, [agentMsgId]: sql }));
+      }
+
+      setThread((prev) => ({ ...prev, messages: [...prev.messages, msg] }));
+      // Refresh updatedAt so thread bubbles to top of the rail (outside setState)
+      upsertThread(threadId, titleRef.current);
+
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setThinking(false);
+      setStreaming(false);
+    }
+  }, []);
+
+  // ── Save session as workflow ────────────────────────────────────────────────
+  const handleSaveWorkflow = async () => {
+    if (savingWf || savedWf) return;
+    setSavingWf(true);
+    try {
+      const res = await fetch("/api/workflows/from-chat", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sessionIdRef.current,
+          name:      thread.title || "Untitled Workflow",
+          description: `Saved from chat session ${threadId}`,
+        }),
+      });
+      if (res.ok) setSavedWf(true);
+    } catch {
+      // non-critical
+    } finally {
+      setSavingWf(false);
     }
   };
 
@@ -175,35 +399,35 @@ export default function ThreadPage() {
           {thread.title || "New conversation"}
         </span>
         <button
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:opacity-90 shrink-0"
-          style={{ background: "#FFA550", color: "#1C1A16" }}
+          onClick={handleSaveWorkflow}
+          disabled={savingWf || thread.messages.length === 0}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:opacity-90 shrink-0 disabled:opacity-40"
+          style={{ background: savedWf ? "var(--success, #22c55e)" : "#FFA550", color: "#1C1A16" }}
         >
-          <Pin size={13} />
-          Save as Workflow
+          {savingWf ? (
+            <><Loader2 size={12} className="animate-spin" />Saving…</>
+          ) : savedWf ? (
+            <><CheckCircle size={12} />Saved!</>
+          ) : (
+            <><Pin size={12} />Save as Workflow</>
+          )}
         </button>
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-6">
-        {thread.messages.length === 0 && !thinking && (
+        {thread.messages.length === 0 && !streaming && (
           <div className="flex flex-col items-center justify-center flex-1 gap-3 text-center py-16">
             <Sparkles size={28} style={{ color: "var(--accent)", opacity: 0.5 }} />
             <p className="text-sm" style={{ color: "var(--text-muted)" }}>
               Ask anything about your Snowflake data
-            </p>
-            <p className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
-              Powered by SRIntelligence™ Analytics
             </p>
           </div>
         )}
 
         {thread.messages.map((msg) => (
           <div key={msg.id}>
-            <ChatMessageComponent
-              message={msg}
-              onFollowup={handleSubmit}
-            />
-            {/* Show SQL collapsible for agent messages */}
+            <ChatMessageComponent message={msg} onFollowup={handleSubmit} />
             {msg.role === "agent" && sqlMap[msg.id] && (
               <div className="ml-9 mt-1">
                 <SQLBadge sql={sqlMap[msg.id]} />
@@ -212,36 +436,8 @@ export default function ThreadPage() {
           </div>
         ))}
 
-        {/* Thinking indicator */}
-        {thinking && (
-          <div className="flex items-center gap-2.5">
-            <div
-              className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
-              style={{
-                background: "linear-gradient(135deg, #2891DA, #FFA550)",
-                boxShadow: "0 1px 4px rgba(40,145,218,0.25)",
-              }}
-            >
-              <Sparkles size={13} color="white" />
-            </div>
-            <div className="flex gap-1.5 items-center py-2">
-              {[0, 1, 2].map((i) => (
-                <span
-                  key={i}
-                  className="w-2 h-2 rounded-full animate-pulse"
-                  style={{
-                    background: "var(--accent)",
-                    opacity: 0.5,
-                    animationDelay: `${i * 0.15}s`,
-                  }}
-                />
-              ))}
-            </div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Analyzing…
-            </span>
-          </div>
-        )}
+        {/* Streaming status */}
+        {streaming && <StreamingStatus status={streamStatus} />}
 
         {/* Error banner */}
         {error && (
@@ -251,12 +447,8 @@ export default function ThreadPage() {
           >
             <AlertCircle size={16} className="shrink-0" style={{ color: "#ef4444", marginTop: 1 }} />
             <div>
-              <p className="text-xs font-semibold mb-0.5" style={{ color: "#ef4444" }}>
-                Request failed
-              </p>
-              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                {error}
-              </p>
+              <p className="text-xs font-semibold mb-0.5" style={{ color: "#ef4444" }}>Request failed</p>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>{error}</p>
             </div>
           </div>
         )}
@@ -270,7 +462,7 @@ export default function ThreadPage() {
           placeholder="Ask a follow-up…"
           onSubmit={handleSubmit}
           compact
-          disabled={thinking}
+          disabled={streaming}
         />
       </div>
     </div>

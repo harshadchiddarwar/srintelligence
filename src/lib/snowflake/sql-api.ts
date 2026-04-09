@@ -93,7 +93,9 @@ function buildRows(
   return rawRows.map((rawRow) => {
     const record: Record<string, unknown> = {};
     columnNames.forEach((col, idx) => {
-      record[col] = rawRow[idx] ?? null;
+      const raw = rawRow[idx];
+      // Trim leading/trailing whitespace from strings (e.g. TO_VARCHAR format-mask padding)
+      record[col] = typeof raw === "string" ? raw.trim() : (raw ?? null);
     });
     return record;
   });
@@ -212,18 +214,15 @@ export async function executeSQL(sql: string, userRole?: string): Promise<SQLRes
     );
   }
 
-  // Check for error in the body even on 200
-  if (json.code && json.message) {
-    throw new SnowflakeError(json.message, {
+  // A successful Snowflake response includes resultSetMetaData.
+  // If it's absent the body is an error payload (even on HTTP 200).
+  const metadata = json.resultSetMetaData;
+  if (!metadata) {
+    throw new SnowflakeError(json.message ?? 'Response missing resultSetMetaData', {
       code: json.code,
       sqlState: json.sqlState,
       sql,
     });
-  }
-
-  const metadata = json.resultSetMetaData;
-  if (!metadata) {
-    throw new SnowflakeError('Response missing resultSetMetaData', { sql });
   }
 
   const columnNames = metadata.rowType.map((col) => col.name);

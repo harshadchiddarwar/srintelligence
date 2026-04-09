@@ -173,7 +173,10 @@ export class AnalystAgent {
 
     if (sql) {
       try {
-        const sqlResult = await executeSQL(sql, input.userPreferences.userId);
+        // Do not prepend USE ROLE — the PAT already authenticates as the
+        // correct role. Passing a role argument would create a 2-statement
+        // request that conflicts with the default statement count of 1.
+        const sqlResult = await executeSQL(sql);
         sqlRows = sqlResult.rows;
         sqlColumns = sqlResult.columns;
       } catch (err) {
@@ -187,44 +190,27 @@ export class AnalystAgent {
     }
 
     // ------------------------------------------------------------------
-    // Build artifacts
+    // Build primary artifact — single object carrying both SQL and results
+    // so downstream synthesizer + chat UI can read rows without losing SQL.
+    // Shape: { results: { headers: string[], rows: (string|number)[][] } }
+    // mirrors what artifactToTableData() and the synthesizer expect.
     // ------------------------------------------------------------------
-    const artifacts: AgentArtifact[] = [];
+    const resultRows: (string | number)[][] = sqlRows.map((row) =>
+      sqlColumns.map((col) => row[col] as string | number),
+    );
 
-    if (sql) {
-      artifacts.push({
-        id: randomUUID(),
-        agentName: this.name,
-        intent: this.intent,
-        data: { type: 'sql', statement: sql },
-        sql,
-        narrative: analystResponse.text || undefined,
-        createdAt: Date.now(),
-        lineageId,
-        cacheStatus: 'miss',
-      });
-    }
-
-    if (sqlRows.length > 0) {
-      artifacts.push({
-        id: randomUUID(),
-        agentName: this.name,
-        intent: this.intent,
-        data: { type: 'table', rows: sqlRows, columns: sqlColumns },
-        sql,
-        narrative: analystResponse.text || undefined,
-        createdAt: Date.now(),
-        lineageId,
-        cacheStatus: 'miss',
-      });
-    }
-
-    // Use the first artifact as the canonical result artifact
-    const primaryArtifact: AgentArtifact = artifacts[0] ?? {
+    const primaryArtifact: AgentArtifact = {
       id: randomUUID(),
       agentName: this.name,
       intent: this.intent,
-      data: { type: 'text', text: analystResponse.text, suggestions: analystResponse.suggestions },
+      data: sql
+        ? {
+            results: sqlRows.length > 0
+              ? { headers: sqlColumns, rows: resultRows }
+              : undefined,
+          }
+        : { type: 'text', text: analystResponse.text, suggestions: analystResponse.suggestions },
+      sql: sql ?? undefined,
       narrative: analystResponse.text || undefined,
       createdAt: Date.now(),
       lineageId,
