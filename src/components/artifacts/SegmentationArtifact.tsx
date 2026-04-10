@@ -79,6 +79,12 @@ export interface SegmentationData {
   droppedFeatures?: string[];
   /** User-specified (protected) features dropped due to near-zero variance */
   droppedProtected?: string[];
+  /** Binary features that were re-encoded to accommodate sparsity */
+  reEncodedBinary?: string[];
+  /** Features flagged as sparse but kept in their original encoding */
+  flaggedSparse?: string[];
+  /** Features explicitly specified by the user to be included (protected) */
+  userProtectedFeatures?: string[];
   clusterCount?: number;
   clusterCountMethod?: "auto" | "user";
   silhouetteScore?: number;
@@ -849,8 +855,11 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
     membershipTable: (data["membershipTable"] as MemberRecord[]) ?? undefined,
     caveats: (data["caveats"] as string[]) ?? undefined,
     featuresUsed: allKeys.length > 0 ? allKeys : (data["featuresUsed"] as string[]) ?? undefined,
-    droppedFeatures:  (data["droppedFeatures"]  as string[]) ?? undefined,
-    droppedProtected: (data["droppedProtected"] as string[]) ?? undefined,
+    droppedFeatures:       (data["droppedFeatures"]       as string[]) ?? undefined,
+    droppedProtected:      (data["droppedProtected"]      as string[]) ?? undefined,
+    reEncodedBinary:       (data["reEncodedBinary"]       as string[]) ?? undefined,
+    flaggedSparse:         (data["flaggedSparse"]         as string[]) ?? undefined,
+    userProtectedFeatures: (data["userProtectedFeatures"] as string[]) ?? undefined,
   };
 }
 
@@ -940,11 +949,14 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     }
   }
 
-  const algorithm        = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
-  const nClusters        = modelMeta.n_clusters;
-  const featureNames     = modelMeta.feature_names ?? [];
-  const droppedFeatures  = modelMeta.dropped_features ?? [];
-  const droppedProtected = modelMeta.dropped_protected ?? [];
+  const algorithm            = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
+  const nClusters            = modelMeta.n_clusters;
+  const featureNames         = modelMeta.feature_names ?? [];
+  const droppedFeatures      = modelMeta.dropped_features ?? [];
+  const droppedProtected     = modelMeta.dropped_protected ?? [];
+  const reEncodedBinary      = modelMeta.re_encoded_binary ?? [];
+  const flaggedSparse        = modelMeta.flagged_sparse ?? [];
+  const userProtectedFeatures = modelMeta.user_protected_features ?? [];
   const silhouette       = modelMeta.global_silhouette_avg;
   const confidenceLabel  = modelMeta.model_confidence_label;
   // n_records from MODEL_METADATA is the authoritative record count
@@ -1118,8 +1130,11 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     nFeaturesInput:  modelMeta.n_features_input  ?? modelMeta.n_features ?? undefined,
     nFeaturesActive: modelMeta.n_features_active ?? modelMeta.n_features ?? undefined,
     featuresUsed:   featureNames.length > 0 ? featureNames : undefined,
-    droppedFeatures: droppedFeatures.length > 0 ? droppedFeatures : undefined,
-    droppedProtected: droppedProtected.length > 0 ? droppedProtected : undefined,
+    droppedFeatures:       droppedFeatures.length > 0       ? droppedFeatures       : undefined,
+    droppedProtected:      droppedProtected.length > 0      ? droppedProtected      : undefined,
+    reEncodedBinary:       reEncodedBinary.length > 0       ? reEncodedBinary       : undefined,
+    flaggedSparse:         flaggedSparse.length > 0         ? flaggedSparse         : undefined,
+    userProtectedFeatures: userProtectedFeatures.length > 0 ? userProtectedFeatures : undefined,
     // Use n_clusters from MODEL_METADATA as the definitive cluster count
     clusterCount: nClusters ?? segments.length,
     clusterCountMethod: "auto",
@@ -1143,79 +1158,92 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
 
 function ModelPerformanceCard({ data }: { data: SegmentationData }) {
   const silhouette = data.silhouetteScore;
-  const silLabel =
-    silhouette == null ? "—"
-    : silhouette >= 0.7 ? "Excellent"
-    : silhouette >= 0.5 ? "Good"
-    : silhouette >= 0.25 ? "Fair"
-    : "Weak";
+
+  // ── Confidence label: prefer server-provided model_confidence_label,
+  // fall back to thresholds if absent (>0.50=High, 0.20–0.50=Moderate, <0.20=Low)
+  const confidenceLabel: string | null =
+    data.confidenceLabel
+    ?? (silhouette == null ? null
+        : silhouette > 0.5  ? "High"
+        : silhouette >= 0.2 ? "Moderate"
+        : "Low");
+
   const silColor =
-    silhouette == null ? "var(--text-muted)"
-    : silhouette >= 0.7 ? "#16a34a"
-    : silhouette >= 0.5 ? "#ca8a04"
-    : silhouette >= 0.25 ? "#ea580c"
+    confidenceLabel === "High"     ? "#16a34a"
+    : confidenceLabel === "Moderate" ? "#ca8a04"
+    : confidenceLabel === "Low"      ? "#e11d48"
+    : silhouette == null             ? "var(--text-muted)"
+    : silhouette >= 0.5              ? "#ca8a04"
     : "#e11d48";
 
-  const silInterpretation =
-    silhouette == null ? null
-    : silhouette >= 0.7
-      ? "Segments are very well-separated and distinct. You can confidently act on these groups — they reflect genuinely different populations."
-      : silhouette >= 0.5
-      ? "Segments show good separation with minimal overlap. The groupings are reliable for most downstream uses."
-      : silhouette >= 0.25
-      ? "Segments have acceptable but noticeable overlap. Use them directionally; some members near the boundary may belong to adjacent groups."
-      : "Segments overlap significantly. Treat this clustering with caution — results may not be stable across different runs or subsets.";
+  // Adjective for natural-language interpretation sentence
+  const confidenceAdjective =
+    confidenceLabel === "High"     ? "strong"
+    : confidenceLabel === "Moderate" ? "moderate"
+    : "weak";
 
-  const confidenceDisplay =
-    data.confidenceLevel == null ? null
-    : data.confidenceLevel <= 1
-    ? `${(data.confidenceLevel * 100).toFixed(0)}%`
-    : `${data.confidenceLevel.toFixed(0)}%`;
+  // Full interpretation sentence in the requested format
+  const silInterpretation = silhouette != null
+    ? `A measure of how well-separated the clusters are, ranging from -1 to +1. ` +
+      `${silhouette.toFixed(2)} is ${confidenceAdjective} — records are meaningfully ` +
+      (confidenceLabel === "High"
+        ? "closer to their own cluster center than to the next nearest cluster, indicating well-differentiated segments."
+        : confidenceLabel === "Moderate"
+        ? "moderately closer to their own cluster center than to neighbouring clusters. Segments are usable but have some overlap."
+        : "no closer to their own cluster than to neighbouring clusters. Use results directionally — segments may not be stable.")
+    : null;
 
   return (
     <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
       <SectionTitle icon={<BarChart2 size={15} />} title="Model Performance" />
 
-      {/* ── Metric pills row ───────────────────────────────────────────────── */}
+      {/* ── Row 1: Metric pills ────────────────────────────────────────────── */}
       <div className="flex flex-wrap gap-3 mb-4">
-        {data.algorithm && <MetricPill label="Algorithm" value={data.algorithm.replace(/_/g, "-")} />}
+        {/* Algorithm — from model_metadata.algorithm */}
+        {data.algorithm && (
+          <MetricPill
+            label="Algorithm"
+            value={data.algorithm.replace(/_/g, "-").replace(/^CLUSTER-/i, "")}
+          />
+        )}
         {data.clusterCount != null && (
           <MetricPill label="Segments" value={data.clusterCount} />
         )}
+        {/* n_records from model_metadata */}
         {data.totalRecords != null && data.totalRecords > 0 && (
           <MetricPill label="Records Clustered" value={data.totalRecords.toLocaleString()} />
         )}
+        {/* n_features_active / n_features_input from model_metadata */}
         {(data.nFeaturesInput != null || data.nFeaturesActive != null) && (() => {
           const input  = data.nFeaturesInput;
           const active = data.nFeaturesActive;
           if (input != null && active != null && input !== active) {
-            return <MetricPill label="Features" value={`${active} of ${input}`} />;
+            return <MetricPill label="Features" value={`${active} active of ${input} input`} />;
           }
           return <MetricPill label="Features" value={active ?? input ?? 0} />;
         })()}
-        {data.confidenceLabel && (
-          <MetricPill label="Model Confidence" value={data.confidenceLabel} />
-        )}
-        {confidenceDisplay != null && (
-          <MetricPill label="Confidence Level" value={confidenceDisplay} />
-        )}
       </div>
 
-      {/* ── Silhouette Score bar + interpretation ─────────────────────────── */}
+      {/* ── Row 2: Silhouette score bar + confidence interpretation ──────── */}
       {silhouette != null && (
-        <div className="rounded-xl p-3 mb-3" style={{ background: "var(--bg-primary, #f8fafc)", border: "1px solid var(--border)" }}>
-          <div className="flex items-center gap-4">
-            {/* Compact bar */}
-            <div className="flex flex-col gap-1" style={{ minWidth: 140, maxWidth: 180, flex: "0 0 auto" }}>
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>Silhouette Score</span>
-                <span className="text-[11px] font-bold ml-2" style={{ color: silColor }}>
+        <div className="rounded-xl p-4" style={{ background: "var(--bg-primary, #f8fafc)", border: "1px solid var(--border)" }}>
+          <div className="flex items-start gap-5">
+
+            {/* Bar column */}
+            <div className="flex flex-col gap-1.5 shrink-0" style={{ minWidth: 160, maxWidth: 200 }}>
+              <div className="flex items-center justify-between mb-0.5">
+                <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+                  Silhouette Score
+                </span>
+                <span className="text-[13px] font-bold" style={{ color: silColor }}>
                   {silhouette.toFixed(3)}
                 </span>
               </div>
-              <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--border)" }}>
+
+              {/* Bar track — range –1 to +1, fill from left */}
+              <div className="relative h-3 rounded-full overflow-hidden" style={{ background: "var(--border)" }}>
                 <div
-                  className="h-full rounded-full"
+                  className="absolute top-0 left-0 h-full rounded-full"
                   style={{
                     width: `${Math.min(Math.max((silhouette + 1) / 2, 0), 1) * 100}%`,
                     background: silColor,
@@ -1223,36 +1251,40 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
                   }}
                 />
               </div>
-              <div className="flex justify-between">
+
+              <div className="flex justify-between items-center">
                 <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>–1</span>
-                <span className="text-[10px] font-semibold" style={{ color: silColor }}>{silLabel}</span>
+                {/* Confidence label badge — from model_confidence_label */}
+                {confidenceLabel && (
+                  <span
+                    className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                    style={{
+                      background: `${silColor}18`,
+                      color: silColor,
+                      border: `1px solid ${silColor}40`,
+                    }}
+                  >
+                    {confidenceLabel} Confidence
+                  </span>
+                )}
                 <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>+1</span>
               </div>
             </div>
 
-            {/* Divider */}
-            <div style={{ width: 1, alignSelf: "stretch", background: "var(--border)", flexShrink: 0 }} />
+            {/* Vertical divider */}
+            <div className="self-stretch shrink-0" style={{ width: 1, background: "var(--border)" }} />
 
-            {/* Interpretation */}
+            {/* Interpretation column */}
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] font-semibold mb-0.5" style={{ color: silColor }}>
-                {silLabel} separation
-              </p>
-              <p className="text-[11px] leading-relaxed" style={{ color: "var(--text-muted)" }}>
+              <p className="text-[11px] leading-relaxed mb-1.5" style={{ color: "var(--text-secondary)" }}>
                 {silInterpretation}
               </p>
-              <p className="text-[10px] mt-1 italic" style={{ color: "var(--text-muted)", opacity: 0.7 }}>
-                Silhouette measures how closely each member fits its own segment vs. the nearest neighbouring segment (range –1 to +1).
+              <p className="text-[10px] italic" style={{ color: "var(--text-muted)", opacity: 0.75 }}>
+                The silhouette score measures how similar each record is to its own cluster compared to other clusters (range –1 to +1). Higher is better.
               </p>
             </div>
           </div>
         </div>
-      )}
-
-      {data.interpretation && !/^#+\s/.test(data.interpretation) && (
-        <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--text-secondary)" }}>
-          {data.interpretation}
-        </p>
       )}
     </div>
   );
@@ -1270,7 +1302,45 @@ interface ModelFeaturesCardProps {
   nFeaturesActive?: number;
   droppedFeatures?: string[];
   droppedProtected?: string[];
+  reEncodedBinary?: string[];
+  flaggedSparse?: string[];
+  userProtectedFeatures?: string[];
   onDownload: () => void;
+}
+
+/** Small section within ModelFeaturesCard */
+function FeatureSection({
+  label, sublabel, features, tagStyle, strikethrough = false,
+}: {
+  label: string;
+  sublabel?: string;
+  features: string[];
+  tagStyle: React.CSSProperties;
+  strikethrough?: boolean;
+}) {
+  if (features.length === 0) return null;
+  return (
+    <div className="mb-4 last:mb-0">
+      <p className="text-[10px] font-bold uppercase tracking-wide mb-2" style={{ color: "var(--text-muted)", letterSpacing: "0.06em" }}>
+        {label}
+        <span className="ml-2 font-normal normal-case tracking-normal" style={{ opacity: 0.7 }}>({features.length})</span>
+      </p>
+      <div className="flex flex-wrap gap-1.5 mb-1">
+        {features.map((f, i) => (
+          <span
+            key={i}
+            className={`text-xs px-2.5 py-1 rounded-lg${strikethrough ? " line-through" : ""}`}
+            style={tagStyle}
+          >
+            {f}
+          </span>
+        ))}
+      </div>
+      {sublabel && (
+        <p className="text-[10px]" style={{ color: "var(--text-muted)", opacity: 0.75 }}>{sublabel}</p>
+      )}
+    </div>
+  );
 }
 
 function ModelFeaturesCard({
@@ -1279,16 +1349,17 @@ function ModelFeaturesCard({
   nFeaturesActive,
   droppedFeatures = [],
   droppedProtected = [],
+  reEncodedBinary = [],
+  flaggedSparse = [],
+  userProtectedFeatures = [],
   onDownload,
 }: ModelFeaturesCardProps) {
   const sorted = [...featuresUsed].sort((a, b) => a.localeCompare(b));
-  const hasDropped = droppedFeatures.length > 0;
-  const hasDroppedProtected = droppedProtected.length > 0;
 
   return (
     <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2 flex-wrap">
           <Table2 size={15} style={{ color: "var(--text-muted)" }} />
           <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
@@ -1296,7 +1367,7 @@ function ModelFeaturesCard({
           </span>
           {nFeaturesInput != null && nFeaturesActive != null && nFeaturesInput !== nFeaturesActive ? (
             <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--border)", color: "var(--text-muted)" }}>
-              {nFeaturesActive} active of {nFeaturesInput} input
+              {nFeaturesActive} active · {nFeaturesInput} input
             </span>
           ) : (
             <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--border)", color: "var(--text-muted)" }}>
@@ -1307,83 +1378,60 @@ function ModelFeaturesCard({
         <DownloadButton label="CSV" onClick={onDownload} />
       </div>
 
-      {/* ── Active features ──────────────────────────────────────────────── */}
-      <div className="mb-4">
-        <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-muted)" }}>
-          USED IN CLUSTERING
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          {sorted.map((f, i) => (
-            <span
-              key={i}
-              className="text-xs px-2.5 py-1 rounded-lg font-medium"
-              style={{
-                background: "#eff6ff",
-                color: "#1d4ed8",
-                border: "1px solid #bfdbfe",
-              }}
-            >
-              {f}
-            </span>
-          ))}
-        </div>
+      {/* Divider between sections */}
+      <div className="flex flex-col gap-4" style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+
+        {/* ── 1. Active features (feature_names) ─────────────────────────── */}
+        <FeatureSection
+          label="Used in clustering"
+          sublabel="These variables were included in the final segmentation model."
+          features={sorted}
+          tagStyle={{ background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe", fontWeight: 500 }}
+        />
+
+        {/* ── 2. User-specified protected features (user_protected_features) */}
+        <FeatureSection
+          label="User-specified (protected)"
+          sublabel="Explicitly requested by the user to be included in the model."
+          features={userProtectedFeatures}
+          tagStyle={{ background: "#f0fdf4", color: "#15803d", border: "1px solid #bbf7d0", fontWeight: 500 }}
+        />
+
+        {/* ── 3. Re-encoded binary (re_encoded_binary) ─────────────────────── */}
+        <FeatureSection
+          label="Re-encoded for sparsity"
+          sublabel="Binary features that were transformed to reduce the effect of sparse or skewed distributions."
+          features={reEncodedBinary}
+          tagStyle={{ background: "#f5f3ff", color: "#5b21b6", border: "1px solid #ddd6fe", fontWeight: 500 }}
+        />
+
+        {/* ── 4. Flagged sparse but NOT re-encoded (flagged_sparse) ─────────── */}
+        <FeatureSection
+          label="Flagged sparse — kept as-is"
+          sublabel="These variables were identified as sparse but were retained in their original form without re-encoding."
+          features={flaggedSparse}
+          tagStyle={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", fontWeight: 500 }}
+        />
+
+        {/* ── 5. Dropped low variance (dropped_features) ───────────────────── */}
+        <FeatureSection
+          label="Dropped — low variance"
+          sublabel="Near-zero variance across the population. Excluded to prevent noise from dominating the model."
+          features={droppedFeatures}
+          tagStyle={{ background: "#fefce8", color: "#92400e", border: "1px solid #fde68a" }}
+          strikethrough
+        />
+
+        {/* ── 6. Dropped protected features (dropped_protected) ────────────── */}
+        <FeatureSection
+          label="Dropped — user-specified, low variance"
+          sublabel="Specified by the user as important but still showed near-zero variance and were excluded."
+          features={droppedProtected}
+          tagStyle={{ background: "#fff1f2", color: "#9f1239", border: "1px solid #fecdd3" }}
+          strikethrough
+        />
+
       </div>
-
-      {/* ── Dropped features (low variance) ──────────────────────────────── */}
-      {hasDropped && (
-        <div className="mb-4">
-          <p className="text-xs font-semibold mb-2 flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
-            <AlertCircle size={11} style={{ color: "#ca8a04" }} />
-            DROPPED — LOW VARIANCE
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {droppedFeatures.map((f, i) => (
-              <span
-                key={i}
-                className="text-xs px-2.5 py-1 rounded-lg line-through"
-                style={{
-                  background: "#fefce8",
-                  color: "#92400e",
-                  border: "1px solid #fde68a",
-                }}
-              >
-                {f}
-              </span>
-            ))}
-          </div>
-          <p className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
-            These variables had near-zero variance across the population and were excluded to prevent noise.
-          </p>
-        </div>
-      )}
-
-      {/* ── Dropped protected features ───────────────────────────────────── */}
-      {hasDroppedProtected && (
-        <div>
-          <p className="text-xs font-semibold mb-2 flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
-            <AlertCircle size={11} style={{ color: "#e11d48" }} />
-            DROPPED — USER-SPECIFIED, LOW VARIANCE
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {droppedProtected.map((f, i) => (
-              <span
-                key={i}
-                className="text-xs px-2.5 py-1 rounded-lg line-through"
-                style={{
-                  background: "#fff1f2",
-                  color: "#9f1239",
-                  border: "1px solid #fecdd3",
-                }}
-              >
-                {f}
-              </span>
-            ))}
-          </div>
-          <p className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
-            These were specified as important by the user but still showed near-zero variance and were excluded.
-          </p>
-        </div>
-      )}
     </div>
   );
 }
@@ -2494,7 +2542,7 @@ export default function SegmentationArtifact({ artifact }: Props) {
       {/* 1. Model Performance */}
       <ModelPerformanceCard data={segData} />
 
-      {/* 2. Features ribbon — shows active features, dropped low-variance, dropped protected */}
+      {/* 2. Features ribbon */}
       {hasFeaturesUsed && (
         <ModelFeaturesCard
           featuresUsed={segData.featuresUsed!}
@@ -2502,12 +2550,17 @@ export default function SegmentationArtifact({ artifact }: Props) {
           nFeaturesActive={segData.nFeaturesActive}
           droppedFeatures={segData.droppedFeatures}
           droppedProtected={segData.droppedProtected}
+          reEncodedBinary={segData.reEncodedBinary}
+          flaggedSparse={segData.flaggedSparse}
+          userProtectedFeatures={segData.userProtectedFeatures}
           onDownload={() => {
-            // CSV includes all three categories with a Status column
             const rows: (string | number)[][] = [
-              ...([...segData.featuresUsed!].sort().map((f) => [f, "Used"])),
-              ...((segData.droppedFeatures ?? []).map((f) => [f, "Dropped – Low Variance"])),
-              ...((segData.droppedProtected ?? []).map((f) => [f, "Dropped – Protected, Low Variance"])),
+              ...[...segData.featuresUsed!].sort().map((f) => [f, "Used in Clustering"]),
+              ...(segData.userProtectedFeatures ?? []).map((f) => [f, "User-Specified (Protected)"]),
+              ...(segData.reEncodedBinary ?? []).map((f) => [f, "Re-encoded for Sparsity"]),
+              ...(segData.flaggedSparse ?? []).map((f) => [f, "Flagged Sparse – Kept"]),
+              ...(segData.droppedFeatures ?? []).map((f) => [f, "Dropped – Low Variance"]),
+              ...(segData.droppedProtected ?? []).map((f) => [f, "Dropped – Protected, Low Variance"]),
             ];
             downloadCSV("features_summary.csv", ["Feature", "Status"], rows);
           }}
