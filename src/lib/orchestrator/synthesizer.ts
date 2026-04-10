@@ -4,6 +4,35 @@
  */
 
 import { randomUUID } from 'crypto';
+
+// ---------------------------------------------------------------------------
+// stripAgentPreamble — remove "I'll/Let me/I will/I'm going to..." sentences
+// that the Cortex agent emits before its actual analysis output.
+// These are planning sentences like:
+//   "I'll segment physicians using GMM clustering with 2 clusters..."
+//   "Let me construct the appropriate clustering query."
+// We strip them so only the substantive result text reaches the chat UI.
+// ---------------------------------------------------------------------------
+function stripAgentPreamble(text: string): string {
+  const lines = text.split('\n');
+  const outputLines: string[] = [];
+  let foundContent = false;
+
+  const PREAMBLE_RE = /^\s*(?:I[''](?:ll|m|ve|d)|Let me|I will|I'm going to|I am going to|I'll be|Sure[,!]|Of course[,!]|Certainly[,!]|Sure thing[,!])\b/i;
+
+  for (const line of lines) {
+    if (!foundContent) {
+      // Skip blank lines before content starts
+      if (line.trim() === '') continue;
+      // Skip lines that are purely agent preamble / planning
+      if (PREAMBLE_RE.test(line)) continue;
+      // Anything else — real content starts here
+      foundContent = true;
+    }
+    outputLines.push(line);
+  }
+  return outputLines.join('\n');
+}
 import type {
   AgentResult,
   AgentIntent,
@@ -273,10 +302,12 @@ export class ResponseSynthesizer {
       case 'CLUSTER_KMEANS':
       case 'CLUSTER_KMEDOIDS': {
         const algo = intent === 'CLUSTER' ? 'GMM' : intent.replace('CLUSTER_', '');
+        // Strip any planning/thinking sentences the Cortex agent prepends before its results
+        const cleanBase = stripAgentPreamble(base);
         return [
           `### ${algo} Cluster Profiles`,
           '',
-          base,
+          cleanBase,
           '',
           `_Algorithm: ${algo} • duration: ${result.durationMs}ms • cache: ${artifact?.cacheStatus ?? 'miss'}_`,
         ].join('\n');

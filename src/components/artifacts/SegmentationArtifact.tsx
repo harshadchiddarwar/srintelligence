@@ -70,7 +70,15 @@ export interface MemberRecord {
 export interface SegmentationData {
   algorithm?: string;
   totalRecords?: number;
+  /** Number of features submitted as inputs to the clustering pipeline (n_features_input) */
+  nFeaturesInput?: number;
+  /** Number of features actually used for clustering after variance filtering (n_features_active) */
+  nFeaturesActive?: number;
   featuresUsed?: string[];
+  /** Features dropped from the pipeline due to near-zero variance */
+  droppedFeatures?: string[];
+  /** User-specified (protected) features dropped due to near-zero variance */
+  droppedProtected?: string[];
   clusterCount?: number;
   clusterCountMethod?: "auto" | "user";
   silhouetteScore?: number;
@@ -823,6 +831,8 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
   return {
     algorithm: (data["algorithm"] as string) ?? undefined,
     totalRecords,
+    nFeaturesInput:  (data["nFeaturesInput"]  as number) ?? undefined,
+    nFeaturesActive: (data["nFeaturesActive"] as number) ?? undefined,
     clusterCount: (data["clusterCount"] as number) ?? segments.length,
     clusterCountMethod: (data["requestedSegments"] as number) ? "user" : "auto",
     silhouetteScore: (data["silhouetteScore"] as number) ?? undefined,
@@ -839,6 +849,8 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
     membershipTable: (data["membershipTable"] as MemberRecord[]) ?? undefined,
     caveats: (data["caveats"] as string[]) ?? undefined,
     featuresUsed: allKeys.length > 0 ? allKeys : (data["featuresUsed"] as string[]) ?? undefined,
+    droppedFeatures:  (data["droppedFeatures"]  as string[]) ?? undefined,
+    droppedProtected: (data["droppedProtected"] as string[]) ?? undefined,
   };
 }
 
@@ -892,16 +904,23 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
   interface ModelMetaShape {
     algorithm?: string;
     n_clusters?: number;
+    n_records?: number;
     n_features?: number;
     n_features_input?: number;
     n_features_active?: number;
     feature_names?: string[];
+    dropped_features?: string[];
+    dropped_protected?: string[];
+    re_encoded_binary?: string[];
+    flagged_sparse?: string[];
+    user_protected_features?: string[];
     global_silhouette_avg?: number;
     model_confidence_label?: string;
     inertia?: number;
     medoid_record_ids?: string[];
     cluster_profiles?: Record<string, ClusterProfile>;
     cluster_sizes?: Record<string, number>;
+    feature_weighting?: Record<string, unknown>;
     pca?: {
       n_components?: number;
       explained_variance_ratio?: number[];
@@ -921,15 +940,20 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     }
   }
 
-  const algorithm       = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
-  const nClusters       = modelMeta.n_clusters;
-  const featureNames    = modelMeta.feature_names ?? [];
-  const silhouette      = modelMeta.global_silhouette_avg;
-  const confidenceLabel = modelMeta.model_confidence_label;
-  const totalRecords    = modelMeta.cluster_sizes
-    ? Object.values(modelMeta.cluster_sizes).reduce((s, n) => s + n, 0)
-    : rows.length;
-  const varRatio        = modelMeta.pca?.explained_variance_ratio;
+  const algorithm        = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
+  const nClusters        = modelMeta.n_clusters;
+  const featureNames     = modelMeta.feature_names ?? [];
+  const droppedFeatures  = modelMeta.dropped_features ?? [];
+  const droppedProtected = modelMeta.dropped_protected ?? [];
+  const silhouette       = modelMeta.global_silhouette_avg;
+  const confidenceLabel  = modelMeta.model_confidence_label;
+  // n_records from MODEL_METADATA is the authoritative record count
+  const totalRecords = (
+    modelMeta.n_records ??
+    (modelMeta.cluster_sizes ? Object.values(modelMeta.cluster_sizes).reduce((s, n) => s + n, 0) : null) ??
+    rows.length
+  );
+  const varRatio = modelMeta.pca?.explained_variance_ratio;
 
   // ── Extract PC dominant features from server-side pca.loadings ──────────
   // Each PC entry has _DOMINANT_FEATURE/_DOMINANT_LOADING plus per-feature numeric loadings.
@@ -1091,7 +1115,12 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
   return {
     algorithm,
     totalRecords,
-    featuresUsed: featureNames.length > 0 ? featureNames : undefined,
+    nFeaturesInput:  modelMeta.n_features_input  ?? modelMeta.n_features ?? undefined,
+    nFeaturesActive: modelMeta.n_features_active ?? modelMeta.n_features ?? undefined,
+    featuresUsed:   featureNames.length > 0 ? featureNames : undefined,
+    droppedFeatures: droppedFeatures.length > 0 ? droppedFeatures : undefined,
+    droppedProtected: droppedProtected.length > 0 ? droppedProtected : undefined,
+    // Use n_clusters from MODEL_METADATA as the definitive cluster count
     clusterCount: nClusters ?? segments.length,
     clusterCountMethod: "auto",
     silhouetteScore: silhouette,
@@ -1102,7 +1131,6 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     pc2Label: "PC2",
     pc1Variance: varRatio?.[0] != null ? varRatio[0] * 100 : undefined,
     pc2Variance: varRatio?.[1] != null ? varRatio[1] * 100 : undefined,
-    // Use server-provided dominant features; fall back to client-side PCA if unavailable
     pc1TopFeatures: pc1TopFeaturesFromServer.length > 0 ? pc1TopFeaturesFromServer : undefined,
     pc2TopFeatures: pc2TopFeaturesFromServer.length > 0 ? pc2TopFeaturesFromServer : undefined,
     membershipTable: membershipTable.length > 0 ? membershipTable : undefined,
@@ -1151,15 +1179,20 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
       {/* ── Metric pills row ───────────────────────────────────────────────── */}
       <div className="flex flex-wrap gap-3 mb-4">
         {data.algorithm && <MetricPill label="Algorithm" value={data.algorithm.replace(/_/g, "-")} />}
-        {data.totalRecords != null && data.totalRecords > 0 && (
-          <MetricPill label="Records Analyzed" value={data.totalRecords.toLocaleString()} />
-        )}
         {data.clusterCount != null && (
-          <MetricPill
-            label={`Clusters (${data.clusterCountMethod === "user" ? "user-defined" : "auto-selected"})`}
-            value={data.clusterCount}
-          />
+          <MetricPill label="Segments" value={data.clusterCount} />
         )}
+        {data.totalRecords != null && data.totalRecords > 0 && (
+          <MetricPill label="Records Clustered" value={data.totalRecords.toLocaleString()} />
+        )}
+        {(data.nFeaturesInput != null || data.nFeaturesActive != null) && (() => {
+          const input  = data.nFeaturesInput;
+          const active = data.nFeaturesActive;
+          if (input != null && active != null && input !== active) {
+            return <MetricPill label="Features" value={`${active} of ${input}`} />;
+          }
+          return <MetricPill label="Features" value={active ?? input ?? 0} />;
+        })()}
         {data.confidenceLabel && (
           <MetricPill label="Model Confidence" value={data.confidenceLabel} />
         )}
@@ -1226,7 +1259,137 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
 }
 
 // ---------------------------------------------------------------------------
-// Features Used Card (collapsible)
+// Model Features Card — always-visible ribbon showing active features,
+// dropped low-variance features, and dropped user-protected features.
+// Replaces FeaturesUsedCard in the main render.
+// ---------------------------------------------------------------------------
+
+interface ModelFeaturesCardProps {
+  featuresUsed: string[];
+  nFeaturesInput?: number;
+  nFeaturesActive?: number;
+  droppedFeatures?: string[];
+  droppedProtected?: string[];
+  onDownload: () => void;
+}
+
+function ModelFeaturesCard({
+  featuresUsed,
+  nFeaturesInput,
+  nFeaturesActive,
+  droppedFeatures = [],
+  droppedProtected = [],
+  onDownload,
+}: ModelFeaturesCardProps) {
+  const sorted = [...featuresUsed].sort((a, b) => a.localeCompare(b));
+  const hasDropped = droppedFeatures.length > 0;
+  const hasDroppedProtected = droppedProtected.length > 0;
+
+  return (
+    <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Table2 size={15} style={{ color: "var(--text-muted)" }} />
+          <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+            Segmentation Features
+          </span>
+          {nFeaturesInput != null && nFeaturesActive != null && nFeaturesInput !== nFeaturesActive ? (
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--border)", color: "var(--text-muted)" }}>
+              {nFeaturesActive} active of {nFeaturesInput} input
+            </span>
+          ) : (
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--border)", color: "var(--text-muted)" }}>
+              {nFeaturesActive ?? nFeaturesInput ?? sorted.length} features
+            </span>
+          )}
+        </div>
+        <DownloadButton label="CSV" onClick={onDownload} />
+      </div>
+
+      {/* ── Active features ──────────────────────────────────────────────── */}
+      <div className="mb-4">
+        <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-muted)" }}>
+          USED IN CLUSTERING
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {sorted.map((f, i) => (
+            <span
+              key={i}
+              className="text-xs px-2.5 py-1 rounded-lg font-medium"
+              style={{
+                background: "#eff6ff",
+                color: "#1d4ed8",
+                border: "1px solid #bfdbfe",
+              }}
+            >
+              {f}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Dropped features (low variance) ──────────────────────────────── */}
+      {hasDropped && (
+        <div className="mb-4">
+          <p className="text-xs font-semibold mb-2 flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+            <AlertCircle size={11} style={{ color: "#ca8a04" }} />
+            DROPPED — LOW VARIANCE
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {droppedFeatures.map((f, i) => (
+              <span
+                key={i}
+                className="text-xs px-2.5 py-1 rounded-lg line-through"
+                style={{
+                  background: "#fefce8",
+                  color: "#92400e",
+                  border: "1px solid #fde68a",
+                }}
+              >
+                {f}
+              </span>
+            ))}
+          </div>
+          <p className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
+            These variables had near-zero variance across the population and were excluded to prevent noise.
+          </p>
+        </div>
+      )}
+
+      {/* ── Dropped protected features ───────────────────────────────────── */}
+      {hasDroppedProtected && (
+        <div>
+          <p className="text-xs font-semibold mb-2 flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+            <AlertCircle size={11} style={{ color: "#e11d48" }} />
+            DROPPED — USER-SPECIFIED, LOW VARIANCE
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {droppedProtected.map((f, i) => (
+              <span
+                key={i}
+                className="text-xs px-2.5 py-1 rounded-lg line-through"
+                style={{
+                  background: "#fff1f2",
+                  color: "#9f1239",
+                  border: "1px solid #fecdd3",
+                }}
+              >
+                {f}
+              </span>
+            ))}
+          </div>
+          <p className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
+            These were specified as important by the user but still showed near-zero variance and were excluded.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Features Used Card (collapsible) — kept for backward-compat with v2 data
 // ---------------------------------------------------------------------------
 
 function FeaturesUsedCard({ features, onDownload }: { features: string[]; onDownload: () => void }) {
@@ -2331,16 +2494,22 @@ export default function SegmentationArtifact({ artifact }: Props) {
       {/* 1. Model Performance */}
       <ModelPerformanceCard data={segData} />
 
-      {/* 2. Features Used (collapsible) */}
+      {/* 2. Features ribbon — shows active features, dropped low-variance, dropped protected */}
       {hasFeaturesUsed && (
-        <FeaturesUsedCard
-          features={segData.featuresUsed!}
+        <ModelFeaturesCard
+          featuresUsed={segData.featuresUsed!}
+          nFeaturesInput={segData.nFeaturesInput}
+          nFeaturesActive={segData.nFeaturesActive}
+          droppedFeatures={segData.droppedFeatures}
+          droppedProtected={segData.droppedProtected}
           onDownload={() => {
-            downloadCSV(
-              "features_used.csv",
-              ["Feature"],
-              [...segData.featuresUsed!].sort().map((f) => [f]),
-            );
+            // CSV includes all three categories with a Status column
+            const rows: (string | number)[][] = [
+              ...([...segData.featuresUsed!].sort().map((f) => [f, "Used"])),
+              ...((segData.droppedFeatures ?? []).map((f) => [f, "Dropped – Low Variance"])),
+              ...((segData.droppedProtected ?? []).map((f) => [f, "Dropped – Protected, Low Variance"])),
+            ];
+            downloadCSV("features_summary.csv", ["Feature", "Status"], rows);
           }}
         />
       )}
