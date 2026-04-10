@@ -80,6 +80,9 @@ export interface SegmentationData {
   pc2Label?: string;
   pc1Variance?: number;
   pc2Variance?: number;
+  /** Top-loading feature names for each PC (derived from eigenvector magnitudes) */
+  pc1TopFeatures?: string[];
+  pc2TopFeatures?: string[];
   membershipTable?: MemberRecord[];
   caveats?: string[];
 }
@@ -100,320 +103,6 @@ const PALETTES = [
 ];
 
 const STROKE_COLORS = PALETTES.map((p) => p.accent);
-
-// ---------------------------------------------------------------------------
-// Unique painting-inspired SVG portrait avatars (8, no repeats)
-// ---------------------------------------------------------------------------
-
-function PaintingAvatar({ index, palette }: { index: number; palette: typeof PALETTES[0] }) {
-  const id = `pa-${index}`;
-  // 8 unique painting-style portrait miniatures
-  const portraits: React.ReactNode[] = [
-
-    // 0 — The Scholar: candlelit study, side profile, quill pen
-    <svg key="p0" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="35%" cy="30%"><stop offset="0%" stopColor="#f8e9c8"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.55"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        {/* warm background wash */}
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.6"/>
-        <ellipse cx="32" cy="14" rx="18" ry="14" fill={palette.accent} opacity="0.12"/>
-        {/* shoulder / torso — dark academic coat */}
-        <path d="M6 56 Q10 38 24 35 Q38 38 42 56Z" fill="#2a1f14"/>
-        {/* white cravat/collar */}
-        <path d="M18 37 Q24 34 30 37 L28 40 Q24 38 20 40Z" fill="#f0ece0"/>
-        {/* head — three-quarter left-facing */}
-        <ellipse cx="22" cy="24" rx="10" ry="12" fill="#e8c9a0"/>
-        {/* hair — swept back, dark */}
-        <path d="M12 20 Q13 10 22 10 Q31 11 32 18 Q29 12 22 13 Q15 13 12 20Z" fill="#2c1a0e"/>
-        <path d="M30 18 Q34 16 33 22" stroke="#2c1a0e" strokeWidth="2.5" fill="none"/>
-        {/* face shading — painterly */}
-        <ellipse cx="20" cy="24" rx="4" ry="5" fill="#d4a87a" opacity="0.3"/>
-        {/* suggestion of features — minimal, painterly */}
-        <path d="M17 22 Q19 21 21 22" stroke="#8b5e3c" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M23 22 Q25 21 27 22" stroke="#8b5e3c" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M19 27 Q22 29 25 27" stroke="#8b5e3c" strokeWidth="1.1" fill="none" opacity="0.8"/>
-        {/* quill pen */}
-        <path d="M30 20 L38 8" stroke="#d4c090" strokeWidth="1.2"/>
-        <path d="M38 8 Q40 6 38 10 Q36 13 34 16Z" fill="#d4c090" opacity="0.8"/>
-      </g>
-      {/* oval portrait frame */}
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 1 — The Noble: rich velvet, front-facing, ornate collar
-    <svg key="p1" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="50%" cy="25%"><stop offset="0%" stopColor="#e8d8f5"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.6"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.5"/>
-        {/* deep velvet background */}
-        <rect x="0" y="0" width="48" height="56" fill={palette.accent} opacity="0.08"/>
-        {/* ornate ruff collar */}
-        <path d="M8 42 Q16 34 24 33 Q32 34 40 42 L40 56 L8 56Z" fill="#f5f0e8"/>
-        <path d="M12 40 Q18 36 24 35 Q30 36 36 40" stroke="#d4c090" strokeWidth="1" fill="none" opacity="0.8"/>
-        <path d="M10 43 Q17 37 24 36 Q31 37 38 43" stroke="#d4c090" strokeWidth="0.7" fill="none" opacity="0.6"/>
-        {/* shoulders — dark velvet */}
-        <path d="M4 56 L6 40 Q14 34 24 33 Q34 34 42 40 L44 56Z" fill="#1e0d2e"/>
-        {/* head */}
-        <ellipse cx="24" cy="23" rx="11" ry="12.5" fill="#e2b990"/>
-        {/* hair — elaborate updo */}
-        <path d="M13 19 Q14 8 24 7 Q34 8 35 19 Q32 10 24 10 Q16 10 13 19Z" fill="#0d0d0d"/>
-        <ellipse cx="24" cy="8" rx="5" ry="3" fill="#1a1a1a"/>
-        <path d="M13 14 Q11 12 12 17" stroke="#0d0d0d" strokeWidth="3" fill="none"/>
-        <path d="M35 14 Q37 12 36 17" stroke="#0d0d0d" strokeWidth="3" fill="none"/>
-        {/* face shading */}
-        <ellipse cx="24" cy="24" rx="5" ry="6" fill="#c9956e" opacity="0.25"/>
-        {/* features */}
-        <path d="M19 21 Q21 20 23 21" stroke="#7a4a2a" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M25 21 Q27 20 29 21" stroke="#7a4a2a" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M21 27 Q24 29.5 27 27" stroke="#7a4a2a" strokeWidth="1.1" fill="none" opacity="0.8"/>
-        {/* jewel brooch */}
-        <circle cx="24" cy="37" r="2.5" fill={palette.accent} opacity="0.9"/>
-        <circle cx="24" cy="37" r="1.2" fill="#fff" opacity="0.7"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 2 — The Impressionist: dappled outdoor light, flowing hat
-    <svg key="p2" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="40%" cy="20%"><stop offset="0%" stopColor="#d4f0d8"/><stop offset="60%" stopColor={palette.accent} stopOpacity="0.3"/><stop offset="100%" stopColor="#a8d8b0" stopOpacity="0.8"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.45"/>
-        {/* impressionist dappled light spots */}
-        <circle cx="8" cy="10" r="6" fill={palette.accent} opacity="0.08"/>
-        <circle cx="38" cy="8" r="8" fill="#fff" opacity="0.15"/>
-        <circle cx="42" cy="30" r="5" fill={palette.accent} opacity="0.1"/>
-        {/* soft torso */}
-        <path d="M4 56 Q10 40 24 37 Q38 40 44 56Z" fill={palette.accent} opacity="0.6"/>
-        {/* light blouse */}
-        <path d="M16 40 Q20 37 24 37 Q28 37 32 40 L30 44 Q24 42 18 44Z" fill="#f0f0ea" opacity="0.9"/>
-        {/* head */}
-        <ellipse cx="24" cy="25" rx="10" ry="11" fill="#f0d0a8"/>
-        {/* wide-brimmed summer hat */}
-        <ellipse cx="24" cy="15" rx="16" ry="5" fill={palette.accent} opacity="0.85"/>
-        <path d="M12 15 Q16 9 24 8 Q32 9 36 15" fill={palette.accent} opacity="0.9"/>
-        {/* hat ribbon */}
-        <path d="M12 15 Q24 13 36 15" stroke={palette.border} strokeWidth="2" fill="none" opacity="0.8"/>
-        {/* face — loose impressionist strokes */}
-        <ellipse cx="22" cy="26" rx="3" ry="4" fill="#d4a070" opacity="0.2"/>
-        <path d="M19 23 Q21 22 23 23" stroke="#8b5e3c" strokeWidth="0.9" fill="none" opacity="0.65"/>
-        <path d="M24.5 23 Q26.5 22 28.5 23" stroke="#8b5e3c" strokeWidth="0.9" fill="none" opacity="0.65"/>
-        <path d="M20 29 Q24 31 28 29" stroke="#8b5e3c" strokeWidth="1.1" fill="none" opacity="0.75"/>
-        {/* loose flowing hair strands */}
-        <path d="M14 22 Q12 30 14 36" stroke="#5c3a1e" strokeWidth="1.5" fill="none" opacity="0.5"/>
-        <path d="M34 22 Q36 28 34 34" stroke="#5c3a1e" strokeWidth="1.5" fill="none" opacity="0.5"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 3 — The Merchant: Baroque confidence, rich coat, looking right
-    <svg key="p3" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="60%" cy="35%"><stop offset="0%" stopColor="#fde8c0"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.5"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.5"/>
-        <ellipse cx="10" cy="45" rx="15" ry="20" fill={palette.accent} opacity="0.07"/>
-        {/* opulent coat */}
-        <path d="M4 56 L8 36 Q16 28 26 27 Q36 28 42 36 L44 56Z" fill="#3a1f08"/>
-        {/* gold trim */}
-        <path d="M18 38 Q24 35 30 38" stroke="#c8a850" strokeWidth="1.5" fill="none"/>
-        <path d="M16 42 Q24 39 32 42" stroke="#c8a850" strokeWidth="1" fill="none" opacity="0.7"/>
-        {/* white jabot */}
-        <path d="M20 36 Q24 33 28 36 Q26 40 24 38 Q22 40 20 36Z" fill="#f5f0e8"/>
-        {/* head — turned slightly right */}
-        <ellipse cx="25" cy="23" rx="10" ry="11.5" fill="#d4a070"/>
-        {/* short curled wig */}
-        <path d="M15 20 Q15 9 25 8 Q35 9 35 20 Q33 11 25 11 Q17 11 15 20Z" fill="#d4c8b0"/>
-        <path d="M15 16 Q12 18 13 22" stroke="#d4c8b0" strokeWidth="3" fill="none"/>
-        <path d="M35 16 Q38 18 37 22" stroke="#d4c8b0" strokeWidth="3" fill="none"/>
-        {/* curls at sides */}
-        <path d="M13 20 Q10 24 13 28" stroke="#c0b090" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
-        <path d="M37 20 Q40 24 37 28" stroke="#c0b090" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
-        {/* face shadow + features */}
-        <ellipse cx="26" cy="24" rx="4" ry="5" fill="#b07840" opacity="0.2"/>
-        <path d="M21 21 Q23 20 25 21" stroke="#6b3a1a" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M27 21 Q29 20 31 21" stroke="#6b3a1a" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M22 27 Q25 29 28 27" stroke="#6b3a1a" strokeWidth="1.1" fill="none" opacity="0.75"/>
-        {/* pocket watch chain */}
-        <path d="M28 38 Q32 36 34 32" stroke="#c8a850" strokeWidth="0.8" fill="none" opacity="0.7"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 4 — The Romantic: Pre-Raphaelite, flowing auburn hair, soft gaze left
-    <svg key="p4" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="50%" cy="30%"><stop offset="0%" stopColor="#fce8f0"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.45"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.45"/>
-        <ellipse cx="36" cy="10" rx="14" ry="10" fill="#fff" opacity="0.2"/>
-        {/* soft draped garment */}
-        <path d="M4 56 Q10 38 24 34 Q38 38 44 56Z" fill={palette.accent} opacity="0.35"/>
-        <path d="M14 56 Q16 40 24 37 Q32 40 34 56Z" fill="#f0e8f4" opacity="0.7"/>
-        {/* head — gentle oval, slightly left */}
-        <ellipse cx="23" cy="24" rx="10" ry="12" fill="#f2d4b0"/>
-        {/* abundant flowing auburn hair */}
-        <path d="M13 22 Q11 14 16 10 Q20 7 24 8 Q28 7 32 10 Q37 14 35 22 Q33 12 24 12 Q15 12 13 22Z" fill="#8b3a14"/>
-        {/* flowing sides */}
-        <path d="M13 20 Q8 28 9 40 Q12 50 14 56" stroke="#8b3a14" strokeWidth="5" fill="none" strokeLinecap="round" opacity="0.8"/>
-        <path d="M35 20 Q40 30 39 42 Q37 50 35 56" stroke="#8b3a14" strokeWidth="4" fill="none" strokeLinecap="round" opacity="0.7"/>
-        {/* highlight strands */}
-        <path d="M14 18 Q10 26 11 36" stroke="#c06030" strokeWidth="1.5" fill="none" opacity="0.5"/>
-        {/* face — Pre-Raphaelite softness */}
-        <ellipse cx="22" cy="25" rx="4" ry="5" fill="#e0a878" opacity="0.2"/>
-        <path d="M18 22 Q20.5 21 23 22" stroke="#7a4030" strokeWidth="0.9" fill="none" opacity="0.65"/>
-        <path d="M24.5 22 Q26.5 21 28.5 22" stroke="#7a4030" strokeWidth="0.9" fill="none" opacity="0.65"/>
-        <path d="M19.5 28 Q23 30.5 26.5 28" stroke="#7a4030" strokeWidth="1.1" fill="none" opacity="0.8"/>
-        {/* floral accent in hair */}
-        <circle cx="14" cy="16" r="2.5" fill={palette.accent} opacity="0.75"/>
-        <circle cx="14" cy="16" r="1.2" fill="#fff" opacity="0.6"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 5 — The Naturalist: cool field scientist, neat coat, specimen in hand
-    <svg key="p5" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="30%" cy="25%"><stop offset="0%" stopColor="#d0f0f8"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.5"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.5"/>
-        <ellipse cx="38" cy="12" rx="12" ry="10" fill={palette.accent} opacity="0.1"/>
-        {/* neat field coat */}
-        <path d="M4 56 L9 36 Q16 28 24 27 Q32 28 39 36 L44 56Z" fill="#1c3a4a"/>
-        {/* light shirt collar */}
-        <path d="M19 34 Q24 31 29 34 L27 37 Q24 35.5 21 37Z" fill="#eef4f8"/>
-        {/* lapels */}
-        <path d="M19 34 Q15 38 14 44" stroke="#152d3a" strokeWidth="2" fill="none"/>
-        <path d="M29 34 Q33 38 34 44" stroke="#152d3a" strokeWidth="2" fill="none"/>
-        {/* head */}
-        <ellipse cx="24" cy="23" rx="10" ry="11.5" fill="#e0c090"/>
-        {/* neat short dark hair */}
-        <path d="M14 20 Q14 9 24 8 Q34 9 34 20 Q32 11 24 11 Q16 11 14 20Z" fill="#1a1a2e"/>
-        <path d="M14 18 Q13 14 14 20" stroke="#1a1a2e" strokeWidth="2" fill="none"/>
-        {/* clean side parting */}
-        <path d="M20 9 Q21 11 20 14" stroke="#2a2a3e" strokeWidth="1" fill="none" opacity="0.5"/>
-        {/* face */}
-        <ellipse cx="24" cy="24" rx="3.5" ry="4.5" fill="#c89858" opacity="0.2"/>
-        <path d="M19.5 21 Q21.5 20 23.5 21" stroke="#5a3a18" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M24.5 21 Q26.5 20 28.5 21" stroke="#5a3a18" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M20.5 27.5 Q24 30 27.5 27.5" stroke="#5a3a18" strokeWidth="1.1" fill="none" opacity="0.75"/>
-        {/* specimen vial / magnifier */}
-        <rect x="31" y="28" width="4" height="9" rx="2" fill={palette.accent} opacity="0.6"/>
-        <rect x="31" y="28" width="4" height="3" rx="1.5" fill="#fff" opacity="0.5"/>
-        <line x1="33" y1="37" x2="33" y2="41" stroke={palette.accent} strokeWidth="1.2" opacity="0.6"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 6 — The Captain: warm golden, facing right, epaulettes
-    <svg key="p6" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="45%" cy="25%"><stop offset="0%" stopColor="#fef5c8"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.5"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.45"/>
-        <ellipse cx="40" cy="40" rx="16" ry="16" fill={palette.accent} opacity="0.08"/>
-        {/* naval coat */}
-        <path d="M4 56 L7 35 Q14 27 24 26 Q34 27 41 35 L44 56Z" fill="#1a2a4a"/>
-        {/* gold epaulettes */}
-        <path d="M7 36 Q12 31 16 33 Q12 35 10 38Z" fill="#c8a030" opacity="0.9"/>
-        <path d="M41 36 Q36 31 32 33 Q36 35 38 38Z" fill="#c8a030" opacity="0.9"/>
-        {/* white stock */}
-        <path d="M19 33 Q24 30 29 33 L27.5 36 Q24 34.5 20.5 36Z" fill="#f5f0e8"/>
-        {/* decorative buttons */}
-        <circle cx="24" cy="39" r="1.5" fill="#c8a030" opacity="0.8"/>
-        <circle cx="24" cy="43.5" r="1.5" fill="#c8a030" opacity="0.8"/>
-        {/* head — right-facing, strong jaw */}
-        <ellipse cx="25" cy="23" rx="10" ry="11" fill="#d4a060"/>
-        {/* peaked officer cap */}
-        <ellipse cx="25" cy="13" rx="13" ry="4" fill="#1a2a4a"/>
-        <rect x="14" y="9" width="22" height="7" rx="3" fill="#1a2a4a"/>
-        {/* cap badge */}
-        <path d="M22 10 L24 7 L26 10" fill="#c8a030" opacity="0.9"/>
-        {/* face */}
-        <ellipse cx="26" cy="24" rx="4" ry="5" fill="#b07030" opacity="0.2"/>
-        <path d="M21 21 Q23.5 20 25.5 21" stroke="#6b3a10" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M27 21 Q29 20 31 21" stroke="#6b3a10" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M22 27.5 Q25.5 30 29 27.5" stroke="#6b3a10" strokeWidth="1.1" fill="none" opacity="0.75"/>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-
-    // 7 — The Composer: dramatic lighting, waistcoat, slightly elevated gaze
-    <svg key="p7" width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id={`${id}-clip`}><ellipse cx="24" cy="26" rx="21" ry="24" /></clipPath>
-        <radialGradient id={`${id}-bg`} cx="50%" cy="60%"><stop offset="0%" stopColor="#ffd8e0"/><stop offset="100%" stopColor={palette.accent} stopOpacity="0.55"/></radialGradient>
-      </defs>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill={`url(#${id}-bg)`} />
-      <g clipPath={`url(#${id}-clip)`}>
-        <rect x="0" y="0" width="48" height="56" fill={palette.bg} opacity="0.45"/>
-        {/* dramatic dark background upper */}
-        <rect x="0" y="0" width="48" height="25" fill="#1a0810" opacity="0.3"/>
-        {/* frock coat */}
-        <path d="M4 56 L8 33 Q15 25 24 24 Q33 25 40 33 L44 56Z" fill="#2a1020"/>
-        {/* waistcoat */}
-        <path d="M17 34 Q24 31 31 34 Q29 42 24 44 Q19 42 17 34Z" fill={palette.accent} opacity="0.6"/>
-        {/* cravat */}
-        <path d="M20 34 Q24 31.5 28 34 L26 37 Q24 36 22 37Z" fill="#f5f0e8"/>
-        {/* head — slightly upward gaze, expressive */}
-        <ellipse cx="24" cy="22" rx="10.5" ry="12" fill="#e8c090"/>
-        {/* wild romantic hair */}
-        <path d="M13 18 Q13 7 24 6 Q35 7 35 18 Q33 8 24 8 Q15 8 13 18Z" fill="#1a0a0a"/>
-        <path d="M13 14 Q10 16 11 22" stroke="#1a0a0a" strokeWidth="3.5" fill="none"/>
-        <path d="M35 14 Q38 16 37 22" stroke="#1a0a0a" strokeWidth="3.5" fill="none"/>
-        {/* dishevelled locks */}
-        <path d="M13 16 Q11 22 12 28" stroke="#2a1010" strokeWidth="2" fill="none" opacity="0.6"/>
-        <path d="M17 8 Q15 12 16 16" stroke="#2a1010" strokeWidth="1.5" fill="none" opacity="0.5"/>
-        {/* face — dramatic lighting from below */}
-        <ellipse cx="24" cy="23" rx="4.5" ry="5.5" fill="#d4a060" opacity="0.15"/>
-        <ellipse cx="24" cy="26" rx="5" ry="3" fill="#fff" opacity="0.08"/>
-        <path d="M19 20 Q21.5 19 24 20" stroke="#6a3818" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M24 20 Q26.5 19 29 20" stroke="#6a3818" strokeWidth="0.9" fill="none" opacity="0.7"/>
-        <path d="M20 26.5 Q24 29 28 26.5" stroke="#6a3818" strokeWidth="1.2" fill="none" opacity="0.75"/>
-        {/* musical note motif */}
-        <text x="36" y="22" fontSize="9" fill={palette.accent} opacity="0.6" fontFamily="serif">♪</text>
-      </g>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.accent} strokeWidth="2" opacity="0.7"/>
-      <ellipse cx="24" cy="26" rx="21" ry="24" fill="none" stroke={palette.border} strokeWidth="4" opacity="0.5" strokeDasharray="2 3"/>
-    </svg>,
-  ];
-
-  return (
-    <div className="shrink-0" style={{ width: 48, height: 56 }}>
-      {portraits[index % portraits.length]}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -792,11 +481,20 @@ function computeZScoresInPlace(segments: SegmentProfile[]): void {
  * Returns one centroid PcaPoint per segment (cluster = segment.id).
  * Uses power-iteration to find the top two eigenvectors of the covariance matrix.
  */
-function computeSegmentPca(segments: SegmentProfile[]): PcaPoint[] {
+interface PcaResult {
+  points: PcaPoint[];
+  pc1Variance: number;
+  pc2Variance: number;
+  /** Top N features by absolute loading magnitude on each PC */
+  pc1TopFeatures: string[];
+  pc2TopFeatures: string[];
+}
+
+function computeSegmentPca(segments: SegmentProfile[]): PcaResult | null {
   const features = Array.from(
     new Set(segments.flatMap((s) => Object.keys(s.zScores ?? {})))
   );
-  if (features.length < 2 || segments.length < 2) return [];
+  if (features.length < 2 || segments.length < 2) return null;
 
   // Build matrix: N segments × P features
   const M: number[][] = segments.map((s) =>
@@ -805,7 +503,7 @@ function computeSegmentPca(segments: SegmentProfile[]): PcaPoint[] {
   const N = M.length;
   const P = features.length;
 
-  // Column-center (z-scores are already roughly centered, but normalise anyway)
+  // Column-center
   const colMeans = features.map((_, j) => M.reduce((s, row) => s + row[j], 0) / N);
   const C: number[][] = M.map((row) => row.map((v, j) => v - colMeans[j]));
 
@@ -818,9 +516,11 @@ function computeSegmentPca(segments: SegmentProfile[]): PcaPoint[] {
     })
   );
 
+  // Total variance = trace of covariance matrix
+  const totalVariance = cov.reduce((s, row, i) => s + row[i], 0) || 1;
+
   /** Power iteration — returns the dominant unit eigenvector of `mat`. */
   function powerIter(mat: number[][]): number[] {
-    // deterministic seed: start with [1, 0, 0, ...]
     let v: number[] = Array.from({ length: P }, (_, i) => (i === 0 ? 1 : 0));
     for (let iter = 0; iter < 80; iter++) {
       const mv = Array.from({ length: P }, (_, i) =>
@@ -832,26 +532,47 @@ function computeSegmentPca(segments: SegmentProfile[]): PcaPoint[] {
     return v;
   }
 
-  const pc1 = powerIter(cov);
-
-  // Deflate: cov2 = cov - λ1 · pc1 · pc1ᵀ
-  // eigenvalue λ1 = pc1ᵀ · cov · pc1
-  const lambda1 = pc1.reduce(
-    (s, _, i) => s + pc1[i] * cov[i].reduce((ss, x, j) => ss + x * pc1[j], 0),
+  const pc1Vec = powerIter(cov);
+  const lambda1 = pc1Vec.reduce(
+    (s, _, i) => s + pc1Vec[i] * cov[i].reduce((ss, x, j) => ss + x * pc1Vec[j], 0),
     0
   );
-  const cov2: number[][] = cov.map((row, i) =>
-    row.map((val, j) => val - lambda1 * pc1[i] * pc1[j])
-  );
-  const pc2 = powerIter(cov2);
 
-  // Project each segment centroid
-  return segments.map((seg, k) => ({
-    pc1: C[k].reduce((s, v, j) => s + v * pc1[j], 0),
-    pc2: C[k].reduce((s, v, j) => s + v * pc2[j], 0),
+  // Deflate for PC2
+  const cov2: number[][] = cov.map((row, i) =>
+    row.map((val, j) => val - lambda1 * pc1Vec[i] * pc1Vec[j])
+  );
+  const pc2Vec = powerIter(cov2);
+  const lambda2 = pc2Vec.reduce(
+    (s, _, i) => s + pc2Vec[i] * cov2[i].reduce((ss, x, j) => ss + x * pc2Vec[j], 0),
+    0
+  );
+
+  // Variance explained (% of total covariance trace)
+  const pc1Variance = Math.min((lambda1 / totalVariance) * 100, 100);
+  const pc2Variance = Math.min((Math.max(lambda2, 0) / totalVariance) * 100, 100);
+
+  // Top features by absolute loading — sort indices by |loading| descending
+  const topN = Math.min(3, P);
+  const pc1TopFeatures = [...features]
+    .map((f, i) => ({ f, w: Math.abs(pc1Vec[i]) }))
+    .sort((a, b) => b.w - a.w)
+    .slice(0, topN)
+    .map((x) => x.f);
+  const pc2TopFeatures = [...features]
+    .map((f, i) => ({ f, w: Math.abs(pc2Vec[i]) }))
+    .sort((a, b) => b.w - a.w)
+    .slice(0, topN)
+    .map((x) => x.f);
+
+  const points: PcaPoint[] = segments.map((seg, k) => ({
+    pc1: C[k].reduce((s, v, j) => s + v * pc1Vec[j], 0),
+    pc2: C[k].reduce((s, v, j) => s + v * pc2Vec[j], 0),
     cluster: seg.id,
     pct: seg.pct > 0 ? seg.pct : undefined,
   }));
+
+  return { points, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures };
 }
 
 // ---------------------------------------------------------------------------
@@ -933,17 +654,31 @@ export function parseClusteringNarrative(text: string): SegmentationData {
     seenIds.add(id);
 
     // ── Parse name vs description from the captured line
-    // The line may be: "**Short-Term Prescribers (34.26%):** Description..."
-    // or just: "Short-Term Prescribers"
+    // The line may be:
+    //   "**Short-Term Prescribers (34.26%):** Description..."   ← prose format
+    //   "Short-Term Prescribers"                                ← simple
+    //   "| Low Brand1 Share | 1,838 | 36.76% | ..."            ← table row (pipe-delimited)
     let rawLine = m[2].trim().replace(/^\*\*+/, "").trim();
 
-    // Split on ":**" (bold colon) or ": " (plain colon)
-    const boldColonIdx = rawLine.indexOf(":**");
-    const plainColonIdx = rawLine.indexOf(": ");
-    const splitIdx = boldColonIdx >= 0 ? boldColonIdx : plainColonIdx >= 0 ? plainColonIdx : -1;
-
-    let shortName = splitIdx > 0 ? rawLine.slice(0, splitIdx).replace(/\*+/g, "").trim() : rawLine.replace(/\*+/g, "").trim();
-    const descFromLine = splitIdx > 0 ? rawLine.slice(splitIdx + (boldColonIdx >= 0 ? 3 : 2)).trim() : "";
+    // ── Table-row format: when the matched suffix is pipe-delimited,
+    //    extract only the first non-empty cell as the name.
+    let descFromLine = "";
+    let shortName: string;
+    if (rawLine.includes("|")) {
+      const cells = rawLine.split("|").map((c) => c.trim()).filter(Boolean);
+      // cells[0] = segment name, cells[1..] = numeric data (size, pct, features, z-scores…)
+      shortName = cells[0].replace(/\*+/g, "").trim();
+      // Any remaining cells that look textual (not purely numeric/percent) become description
+      const nonNumericCells = cells.slice(1).filter((c) => /[A-Za-z]/.test(c) && c.length > 1);
+      descFromLine = nonNumericCells.join(" · ").trim();
+    } else {
+      // Split on ":**" (bold colon) or ": " (plain colon)
+      const boldColonIdx = rawLine.indexOf(":**");
+      const plainColonIdx = rawLine.indexOf(": ");
+      const splitIdx = boldColonIdx >= 0 ? boldColonIdx : plainColonIdx >= 0 ? plainColonIdx : -1;
+      shortName = splitIdx > 0 ? rawLine.slice(0, splitIdx).replace(/\*+/g, "").trim() : rawLine.replace(/\*+/g, "").trim();
+      descFromLine = splitIdx > 0 ? rawLine.slice(splitIdx + (boldColonIdx >= 0 ? 3 : 2)).trim() : "";
+    }
 
     // ── Extract pct from name like "Short-Term Prescribers (34.26%)"
     const pctFromName = shortName.match(/([\d.]+)\s*%/);
@@ -1006,9 +741,13 @@ export function parseClusteringNarrative(text: string): SegmentationData {
   computeZScoresInPlace(segments);
 
   // ── Build PCA centroid points from z-scores (1 point per segment)
-  const pcaPoints = computeSegmentPca(segments);
-  if (pcaPoints.length > 0) {
-    result.pcaPoints = pcaPoints;
+  const pcaResult = computeSegmentPca(segments);
+  if (pcaResult && pcaResult.points.length > 0) {
+    result.pcaPoints    = pcaResult.points;
+    result.pc1Variance  = pcaResult.pc1Variance;
+    result.pc2Variance  = pcaResult.pc2Variance;
+    result.pc1TopFeatures = pcaResult.pc1TopFeatures;
+    result.pc2TopFeatures = pcaResult.pc2TopFeatures;
     result.pc1Label = "PC1";
     result.pc2Label = "PC2";
   }
@@ -1042,7 +781,11 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
 
     return {
       id: (seg["id"] as number) ?? i,
-      name: ((seg["label"] as string) ?? (seg["name"] as string) ?? `Segment ${i + 1}`).replace(/^\s*[—–\-]\s*/, "").trim(),
+      name: (() => {
+        const raw = ((seg["label"] as string) ?? (seg["name"] as string) ?? `Segment ${i + 1}`).replace(/^\s*[—–\-]\s*/, "").trim();
+        // Strip pipe-delimited table data that may have leaked into the name field
+        return raw.includes("|") ? raw.split("|").map((c) => c.trim()).filter(Boolean)[0] ?? `Segment ${i + 1}` : raw;
+      })(),
       size,
       pct,
       characteristics,
@@ -1579,7 +1322,6 @@ function SegmentProfileCard({ seg, index }: { seg: SegmentProfile; index: number
     >
       {/* Header */}
       <div className="flex items-start gap-3">
-        <PaintingAvatar index={index} palette={pal} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-bold" style={{ color: pal.text }}>{seg.name}</span>
@@ -1681,11 +1423,13 @@ interface PcaScatterProps {
   pc2Label?: string;
   pc1Variance?: number;
   pc2Variance?: number;
+  pc1TopFeatures?: string[];
+  pc2TopFeatures?: string[];
   segmentNames: Record<number, string>;
   height?: number;
 }
 
-function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, segmentNames, height = 340 }: PcaScatterProps) {
+function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures, segmentNames, height = 340 }: PcaScatterProps) {
   const grouped: Record<number, { pc1: number; pc2: number; cluster: number; name: string; pct?: number }[]> = {};
   for (const p of points) {
     if (!grouped[p.cluster]) grouped[p.cluster] = [];
@@ -1711,18 +1455,27 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
     return 10 + Math.sqrt(p / maxPct) * 20; // 10 – 30 px
   };
 
-  // Axis labels: include variance % interpretation if available
-  const xLabel = pc1Variance != null
-    ? `${pc1Label ?? "PC1"} — Primary Differentiation Axis (${pc1Variance.toFixed(1)}% of variance explained)`
-    : `${pc1Label ?? "PC1"} — Primary Differentiation Axis`;
-  const yLabel = pc2Variance != null
-    ? `${pc2Label ?? "PC2"} — Secondary Differentiation Axis (${pc2Variance.toFixed(1)}% explained)`
-    : `${pc2Label ?? "PC2"} — Secondary Differentiation Axis`;
+  // Build axis labels — prefer dominant feature name when available
+  const pc1Dominant = pc1TopFeatures && pc1TopFeatures.length > 0 ? pc1TopFeatures[0] : null;
+  const pc2Dominant = pc2TopFeatures && pc2TopFeatures.length > 0 ? pc2TopFeatures[0] : null;
+
+  const xLabel = pc1Dominant
+    ? `PC1: ${pc1Dominant}${pc1Variance != null ? ` (${pc1Variance.toFixed(1)}% var.)` : ""}`
+    : pc1Variance != null
+      ? `${pc1Label ?? "PC1"} (${pc1Variance.toFixed(1)}% var.)`
+      : (pc1Label ?? "PC1");
+
+  const yLabel = pc2Dominant
+    ? `PC2: ${pc2Dominant}${pc2Variance != null ? ` (${pc2Variance.toFixed(1)}% var.)` : ""}`
+    : pc2Variance != null
+      ? `${pc2Label ?? "PC2"} (${pc2Variance.toFixed(1)}% var.)`
+      : (pc2Label ?? "PC2");
 
   return (
     <ResponsiveContainer width="100%" height={height}>
       {/* Extra bottom margin so legend doesn't collide with X-axis label */}
-      <ScatterChart margin={{ top: 20, right: 50, bottom: 55, left: 65 }}>
+      {/* left:90 reserves space for the rotated Y-axis title outside the tick numbers */}
+      <ScatterChart margin={{ top: 20, right: 50, bottom: 55, left: 90 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
         <XAxis
           dataKey="pc1"
@@ -1736,8 +1489,27 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
           type="number"
           name="PC2"
           tick={{ fontSize: 10 }}
-          label={{ value: yLabel, angle: -90, position: "insideLeft", offset: 15, fontSize: 10, fill: "#888", dy: -10 }}
-          width={60}
+          width={55}
+          label={(props: { viewBox?: { x: number; y: number; width: number; height: number } }) => {
+            const vb = props.viewBox ?? { x: 0, y: 0, width: 55, height: 340 };
+            // Place the label to the LEFT of the tick numbers:
+            // vb.x is the left edge of the plot area; subtract enough to clear the tick numbers (~40px wide)
+            const cx = vb.x - 38;
+            const cy = vb.y + vb.height / 2;
+            return (
+              <text
+                x={cx}
+                y={cy}
+                transform={`rotate(-90, ${cx}, ${cy})`}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fontSize={10}
+                fill="#888"
+              >
+                {yLabel}
+              </text>
+            );
+          }}
         />
         <Tooltip
           cursor={{ strokeDasharray: "3 3" }}
@@ -1957,22 +1729,24 @@ interface HeatmapProps {
   segments: SegmentProfile[];
 }
 
-/** Convert a z-score to a CSS rgb() colour: red = below average, green = above average. */
+/** Convert a z-score to a CSS rgb() colour: red = below average, green = above average.
+ *  Neutral baseline is rgb(245,245,245) instead of pure white. */
 function zToHeatColor(z: number, maxAbs: number): string {
+  const BASE = 245; // neutral mid-point
   const t = Math.max(-1, Math.min(1, z / Math.max(maxAbs, 0.01)));
   if (t < 0) {
-    // below average → red shades (white → red)
+    // below average → red shades (245,245,245 → 255,67,67)
     const intensity = Math.abs(t);
-    const r = 255;
-    const g = Math.round(255 - intensity * 178); // 255 → 77
-    const b = Math.round(255 - intensity * 178);
+    const r = BASE;
+    const g = Math.round(BASE - intensity * 178); // 245 → 67
+    const b = Math.round(BASE - intensity * 178);
     return `rgb(${r},${g},${b})`;
   } else {
-    // above average → green shades (white → green)
+    // above average → green shades (245,245,245 → 67,225,67)
     const intensity = t;
-    const r = Math.round(255 - intensity * 178);
-    const g = Math.round(200 + intensity * 35); // 200 → 235 (rich forest green)
-    const b = Math.round(255 - intensity * 178);
+    const r = Math.round(BASE - intensity * 178); // 245 → 67
+    const g = Math.round(BASE - intensity * 10);  // 245 → 235 (stays high)
+    const b = Math.round(BASE - intensity * 178); // 245 → 67
     return `rgb(${r},${g},${b})`;
   }
 }
@@ -2108,7 +1882,7 @@ function ZScoreHeatmap({ segments }: HeatmapProps) {
             flex: 1,
             maxWidth: 140,
             height: 8,
-            background: "linear-gradient(to right, rgb(255,77,77), #fff, rgb(77,235,77))",
+            background: "linear-gradient(to right, rgb(255,67,67), rgb(245,245,245), rgb(67,235,67))",
             borderRadius: 4,
             border: "1px solid rgba(0,0,0,0.08)",
           }}
@@ -2300,9 +2074,13 @@ export default function SegmentationArtifact({ artifact }: Props) {
         extractMetricsIntoSegments(artifact.narrative, segData.segments);
         computeZScoresInPlace(segData.segments);
         if (!segData.pcaPoints?.length) {
-          const pts = computeSegmentPca(segData.segments);
-          if (pts.length > 0) {
-            segData.pcaPoints = pts;
+          const pcaResult = computeSegmentPca(segData.segments);
+          if (pcaResult && pcaResult.points.length > 0) {
+            segData.pcaPoints     = pcaResult.points;
+            segData.pc1Variance   = pcaResult.pc1Variance;
+            segData.pc2Variance   = pcaResult.pc2Variance;
+            segData.pc1TopFeatures = pcaResult.pc1TopFeatures;
+            segData.pc2TopFeatures = pcaResult.pc2TopFeatures;
             segData.pc1Label = "PC1";
             segData.pc2Label = "PC2";
           }
@@ -2487,12 +2265,6 @@ export default function SegmentationArtifact({ artifact }: Props) {
               Bubble size reflects segment population share. Distance between bubbles indicates how distinct segments are.
             </p>
           )}
-          {segData.pc1Variance != null && segData.pc2Variance != null && (
-            <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-              Together PC1 + PC2 capture {(segData.pc1Variance + segData.pc2Variance).toFixed(1)}% of the total variance
-              across all segmentation features.
-            </p>
-          )}
           <div ref={pcaRef}>
             <PcaScatterChart
               points={pcaPoints!}
@@ -2500,9 +2272,44 @@ export default function SegmentationArtifact({ artifact }: Props) {
               pc2Label={segData.pc2Label}
               pc1Variance={segData.pc1Variance}
               pc2Variance={segData.pc2Variance}
+              pc1TopFeatures={segData.pc1TopFeatures}
+              pc2TopFeatures={segData.pc2TopFeatures}
               segmentNames={segmentNames}
             />
           </div>
+          {/* Variance breakdown note below chart */}
+          {(segData.pc1Variance != null || segData.pc2Variance != null) && (() => {
+            const v1 = segData.pc1Variance;
+            const v2 = segData.pc2Variance;
+            const combined = v1 != null && v2 != null ? v1 + v2 : null;
+            const tf1 = segData.pc1TopFeatures?.slice(0, 2).join(", ");
+            const tf2 = segData.pc2TopFeatures?.slice(0, 2).join(", ");
+            return (
+              <div className="mt-3 rounded-xl px-4 py-3 text-xs flex flex-wrap gap-3" style={{ background: "var(--bg-primary, #f8fafc)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                {v1 != null && (
+                  <span>
+                    <span className="font-semibold" style={{ color: "var(--text-secondary)" }}>PC1</span>
+                    {" — "}{v1.toFixed(1)}% of variance
+                    {tf1 ? <span style={{ opacity: 0.75 }}> · driven by <em>{tf1}</em></span> : null}
+                  </span>
+                )}
+                {v1 != null && v2 != null && <span style={{ opacity: 0.4 }}>|</span>}
+                {v2 != null && (
+                  <span>
+                    <span className="font-semibold" style={{ color: "var(--text-secondary)" }}>PC2</span>
+                    {" — "}{v2.toFixed(1)}% of variance
+                    {tf2 ? <span style={{ opacity: 0.75 }}> · driven by <em>{tf2}</em></span> : null}
+                  </span>
+                )}
+                {combined != null && (
+                  <>
+                    <span style={{ opacity: 0.4 }}>|</span>
+                    <span><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>Combined</span>{" — "}{combined.toFixed(1)}% of total feature variance captured</span>
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2589,6 +2396,8 @@ export default function SegmentationArtifact({ artifact }: Props) {
             pc2Label={segData.pc2Label}
             pc1Variance={segData.pc1Variance}
             pc2Variance={segData.pc2Variance}
+            pc1TopFeatures={segData.pc1TopFeatures}
+            pc2TopFeatures={segData.pc2TopFeatures}
             segmentNames={segmentNames}
             height={Math.max(500, (typeof window !== "undefined" ? window.innerHeight : 700) - 160)}
           />
