@@ -54,7 +54,9 @@ export interface PcaPoint {
   pc1: number;
   pc2: number;
   cluster: number;
-  pct?: number;  // segment membership % (for centroid mode tooltip)
+  pct?: number;           // segment membership % (for centroid/bubble mode tooltip)
+  recordId?: string | number; // individual member record ID (from RECORD_ID column)
+  memberZScores?: Record<string, number>; // per-member feature z-scores (from FEATURE_ZSCORES column)
 }
 
 export interface MemberRecord {
@@ -73,6 +75,8 @@ export interface SegmentationData {
   clusterCountMethod?: "auto" | "user";
   silhouetteScore?: number;
   confidenceLevel?: number;
+  /** Human-readable confidence label from Snowflake (e.g. "High", "Medium", "Low") */
+  confidenceLabel?: string;
   interpretation?: string;
   segments: SegmentProfile[];
   pcaPoints?: PcaPoint[];
@@ -80,7 +84,7 @@ export interface SegmentationData {
   pc2Label?: string;
   pc1Variance?: number;
   pc2Variance?: number;
-  /** Top-loading feature names for each PC (derived from eigenvector magnitudes) */
+  /** Top-loading feature names for each PC (from server pca.loadings or client eigenvector) */
   pc1TopFeatures?: string[];
   pc2TopFeatures?: string[];
   membershipTable?: MemberRecord[];
@@ -822,6 +826,7 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
     clusterCount: (data["clusterCount"] as number) ?? segments.length,
     clusterCountMethod: (data["requestedSegments"] as number) ? "user" : "auto",
     silhouetteScore: (data["silhouetteScore"] as number) ?? undefined,
+    confidenceLabel: (data["confidenceLabel"] as string) ?? undefined,
     interpretation: (data["interpretation"] as string) ?? undefined,
     segments,
     pcaPoints: pcaPoints && pcaPoints.length > 0 ? pcaPoints : undefined,
@@ -829,6 +834,8 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
     pc2Label: (data["pc2Label"] as string) ?? undefined,
     pc1Variance: (data["pc1Variance"] as number) ?? undefined,
     pc2Variance: (data["pc2Variance"] as number) ?? undefined,
+    pc1TopFeatures: (data["pc1TopFeatures"] as string[]) ?? undefined,
+    pc2TopFeatures: (data["pc2TopFeatures"] as string[]) ?? undefined,
     membershipTable: (data["membershipTable"] as MemberRecord[]) ?? undefined,
     caveats: (data["caveats"] as string[]) ?? undefined,
     featuresUsed: allKeys.length > 0 ? allKeys : (data["featuresUsed"] as string[]) ?? undefined,
@@ -873,21 +880,37 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
 
   const rows = results.rows;
 
+  const ciFeatureZScores = col("FEATURE_ZSCORES");
+
   // ── Parse MODEL_METADATA from first row (identical for all rows)
-  type ClusterProfile = Record<string, { mean?: number; z_score?: number } | string | number>;
+  type ClusterProfile = Record<string, { mean?: number; z_score?: number } | string | number | Record<string, number>>;
+  interface PcaLoadingEntry {
+    _DOMINANT_FEATURE?: string;
+    _DOMINANT_LOADING?: number;
+    [feature: string]: number | string | undefined;
+  }
   interface ModelMetaShape {
     algorithm?: string;
     n_clusters?: number;
     n_features?: number;
+    n_features_input?: number;
+    n_features_active?: number;
     feature_names?: string[];
     global_silhouette_avg?: number;
     model_confidence_label?: string;
+    inertia?: number;
+    medoid_record_ids?: string[];
     cluster_profiles?: Record<string, ClusterProfile>;
     cluster_sizes?: Record<string, number>;
     pca?: {
       n_components?: number;
       explained_variance_ratio?: number[];
       cumulative_variance?: number;
+      loadings?: {
+        PC1?: PcaLoadingEntry;
+        PC2?: PcaLoadingEntry;
+        [pc: string]: PcaLoadingEntry | undefined;
+      };
     };
   }
   let modelMeta: ModelMetaShape = {};
@@ -898,14 +921,42 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     }
   }
 
-  const algorithm    = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
-  const nClusters    = modelMeta.n_clusters;
-  const featureNames = modelMeta.feature_names ?? [];
-  const silhouette   = modelMeta.global_silhouette_avg;
-  const totalRecords = modelMeta.cluster_sizes
+  const algorithm       = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
+  const nClusters       = modelMeta.n_clusters;
+  const featureNames    = modelMeta.feature_names ?? [];
+  const silhouette      = modelMeta.global_silhouette_avg;
+  const confidenceLabel = modelMeta.model_confidence_label;
+  const totalRecords    = modelMeta.cluster_sizes
     ? Object.values(modelMeta.cluster_sizes).reduce((s, n) => s + n, 0)
     : rows.length;
-  const varRatio     = modelMeta.pca?.explained_variance_ratio;
+  const varRatio        = modelMeta.pca?.explained_variance_ratio;
+
+  // ── Extract PC dominant features from server-side pca.loadings ──────────
+  // Each PC entry has _DOMINANT_FEATURE/_DOMINANT_LOADING plus per-feature numeric loadings.
+  // Build a sorted list (by |loading| desc) so we can show top-N in axis labels.
+  const pcaLoadings = modelMeta.pca?.loadings;
+  const extractTopFeatures = (entry: Record<string, number | string | undefined>): string[] => {
+    if (!entry) return [];
+    // If server gives us _DOMINANT_FEATURE, put it first
+    const dominant = typeof entry._DOMINANT_FEATURE === "string" ? entry._DOMINANT_FEATURE as string : null;
+    // Collect all numeric loadings (skip _ prefixed internal keys)
+    const weighted: { f: string; w: number }[] = [];
+    for (const [k, v] of Object.entries(entry)) {
+      if (k.startsWith("_")) continue;
+      if (typeof v === "number") weighted.push({ f: k, w: Math.abs(v) });
+    }
+    weighted.sort((a, b) => b.w - a.w);
+    const sorted = weighted.map((x) => x.f);
+    // Ensure dominant is first if present
+    if (dominant && !sorted.includes(dominant)) sorted.unshift(dominant);
+    else if (dominant && sorted[0] !== dominant) {
+      const idx = sorted.indexOf(dominant);
+      if (idx > 0) { sorted.splice(idx, 1); sorted.unshift(dominant); }
+    }
+    return sorted.slice(0, 3);
+  };
+  const pc1TopFeaturesFromServer = pcaLoadings?.PC1 ? extractTopFeatures(pcaLoadings.PC1 as Record<string, number | string | undefined>) : [];
+  const pc2TopFeaturesFromServer = pcaLoadings?.PC2 ? extractTopFeatures(pcaLoadings.PC2 as Record<string, number | string | undefined>) : [];
 
   // ── Build segments from cluster_profiles in MODEL_METADATA
   const segments: SegmentProfile[] = [];
@@ -930,13 +981,13 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     let topDriver: string | undefined;
 
     for (const [feat, val] of Object.entries(profile)) {
-      if (feat === "_TOP_DRIVER") {
-        topDriver = String(val);
+      if (feat.startsWith("_")) {
+        // Internal metadata keys: _TOP_DRIVER, _TOP_DRIVER_ZSCORE, _MEDOID_ID, _MEDOID_VALUES, _MEDOID_PC1, _MEDOID_PC2
+        if (feat === "_TOP_DRIVER") topDriver = String(val);
         continue;
       }
-      if (feat === "_TOP_DRIVER_ZSCORE") continue;
       const featureData = val as { mean?: number; z_score?: number } | null;
-      if (featureData && typeof featureData === "object") {
+      if (featureData && typeof featureData === "object" && !Array.isArray(featureData)) {
         if (typeof featureData.mean    === "number") avgValues[feat] = featureData.mean;
         if (typeof featureData.z_score === "number") zScores[feat]   = featureData.z_score;
       }
@@ -944,7 +995,7 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
 
     const topDriverZ = profile["_TOP_DRIVER_ZSCORE"];
     const topDriverLabel = topDriver
-      ? `${topDriver} (Z=${typeof topDriverZ === "number" ? topDriverZ.toFixed(2) : "?"})`
+      ? `${topDriver} (Z=${typeof topDriverZ === "number" ? (topDriverZ as number).toFixed(2) : "?"})`
       : undefined;
 
     segments.push({ id, name, size, pct, characteristics: [], avgValues, zScores, topDriver: topDriverLabel, description: undefined });
@@ -973,20 +1024,40 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     segments.sort((a, b) => a.id - b.id);
   }
 
-  // ── Build PCA points from per-row PC1 / PC2 columns
+  // ── Build PCA points from per-row PC1 / PC2 columns (one point per individual member)
   const pcaPoints: PcaPoint[] = [];
   if (ciPc1 >= 0 && ciPc2 >= 0) {
     for (const row of rows) {
-      const pc1     = Number(row[ciPc1]);
-      const pc2     = Number(row[ciPc2]);
-      const cluster = parseInt(String(row[ciClusterId]));
+      const pc1      = Number(row[ciPc1]);
+      const pc2      = Number(row[ciPc2]);
+      const cluster  = parseInt(String(row[ciClusterId]));
       if (!isNaN(pc1) && !isNaN(pc2) && !isNaN(cluster)) {
-        pcaPoints.push({ pc1, pc2, cluster });
+        const pt: PcaPoint = { pc1, pc2, cluster };
+        // Record ID for tooltip
+        if (ciRecordId >= 0) pt.recordId = row[ciRecordId] as string | number;
+        // Per-member FEATURE_ZSCORES — keys have _Z_SCORE suffix, strip it
+        if (ciFeatureZScores >= 0) {
+          const raw = row[ciFeatureZScores];
+          if (typeof raw === "string") {
+            try {
+              const parsed = JSON.parse(raw) as Record<string, number>;
+              const stripped: Record<string, number> = {};
+              for (const [k, v] of Object.entries(parsed)) {
+                if (typeof v === "number") {
+                  // Strip trailing _Z_SCORE suffix (case-insensitive)
+                  stripped[k.replace(/_Z_SCORE$/i, "")] = v;
+                }
+              }
+              if (Object.keys(stripped).length > 0) pt.memberZScores = stripped;
+            } catch { /* malformed JSON */ }
+          }
+        }
+        pcaPoints.push(pt);
       }
     }
   }
 
-  // ── Build membership table
+  // ── Build membership table (one row per member)
   const membershipTable: MemberRecord[] = rows.map((row) => {
     const rec: MemberRecord = {
       id:      ciRecordId >= 0 ? row[ciRecordId] : "?",
@@ -995,8 +1066,25 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
         ? String(row[ciClusterLabel]).replace(/^(?:Segment|Cluster)\s+\d+\s*[:\-–—]\s*/i, "").trim()
         : undefined,
     };
-    if (ciProbability >= 0) rec["Probability"] = Number(row[ciProbability]).toFixed(3);
-    if (ciEntropy     >= 0) rec["Entropy"]      = Number(row[ciEntropy]).toFixed(3);
+    if (ciProbability   >= 0) rec["Probability"] = Number(row[ciProbability]).toFixed(3);
+    if (ciEntropy       >= 0) rec["Entropy"]      = Number(row[ciEntropy]).toFixed(3);
+    if (ciPc1           >= 0) rec["PC1"]          = Number(row[ciPc1]).toFixed(4);
+    if (ciPc2           >= 0) rec["PC2"]          = Number(row[ciPc2]).toFixed(4);
+    // Add individual feature z-scores (stripped of _Z_SCORE suffix) as membership columns
+    if (ciFeatureZScores >= 0) {
+      const raw = row[ciFeatureZScores];
+      if (typeof raw === "string") {
+        try {
+          const parsed = JSON.parse(raw) as Record<string, number>;
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === "number") {
+              const cleanKey = k.replace(/_Z_SCORE$/i, "") + "_Z";
+              rec[cleanKey] = v.toFixed(3);
+            }
+          }
+        } catch { /* malformed */ }
+      }
+    }
     return rec;
   });
 
@@ -1007,12 +1095,16 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     clusterCount: nClusters ?? segments.length,
     clusterCountMethod: "auto",
     silhouetteScore: silhouette,
+    confidenceLabel,
     segments,
     pcaPoints: pcaPoints.length > 0 ? pcaPoints : undefined,
     pc1Label: "PC1",
     pc2Label: "PC2",
     pc1Variance: varRatio?.[0] != null ? varRatio[0] * 100 : undefined,
     pc2Variance: varRatio?.[1] != null ? varRatio[1] * 100 : undefined,
+    // Use server-provided dominant features; fall back to client-side PCA if unavailable
+    pc1TopFeatures: pc1TopFeaturesFromServer.length > 0 ? pc1TopFeaturesFromServer : undefined,
+    pc2TopFeatures: pc2TopFeaturesFromServer.length > 0 ? pc2TopFeaturesFromServer : undefined,
     membershipTable: membershipTable.length > 0 ? membershipTable : undefined,
   };
 }
@@ -1067,6 +1159,9 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
             label={`Clusters (${data.clusterCountMethod === "user" ? "user-defined" : "auto-selected"})`}
             value={data.clusterCount}
           />
+        )}
+        {data.confidenceLabel && (
+          <MetricPill label="Model Confidence" value={data.confidenceLabel} />
         )}
         {confidenceDisplay != null && (
           <MetricPill label="Confidence Level" value={confidenceDisplay} />
@@ -1430,10 +1525,10 @@ interface PcaScatterProps {
 }
 
 function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures, segmentNames, height = 340 }: PcaScatterProps) {
-  const grouped: Record<number, { pc1: number; pc2: number; cluster: number; name: string; pct?: number }[]> = {};
+  const grouped: Record<number, (PcaPoint & { name: string })[]> = {};
   for (const p of points) {
     if (!grouped[p.cluster]) grouped[p.cluster] = [];
-    grouped[p.cluster].push({ pc1: p.pc1, pc2: p.pc2, cluster: p.cluster, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}`, pct: p.pct });
+    grouped[p.cluster].push({ ...p, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}` });
   }
 
   // Bubble mode: every cluster collapses to a single distinct (pc1, pc2) position.
@@ -1515,13 +1610,31 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
           cursor={{ strokeDasharray: "3 3" }}
           content={({ active, payload }) => {
             if (!active || !payload?.length) return null;
-            const d = payload[0].payload as { pc1: number; pc2: number; cluster: number; name: string; pct?: number };
+            const d = payload[0].payload as PcaPoint & { name: string };
+            const isIndividualMember = d.recordId != null;
             return (
-              <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+              <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", maxWidth: 220 }}>
                 <p className="font-semibold mb-0.5">{d.name}</p>
-                {d.pct != null && d.pct > 0 && <p style={{ color: "var(--text-muted)" }}>{d.pct.toFixed(1)}% of population</p>}
-                <p style={{ color: "var(--text-muted)" }}>PC1: {d.pc1.toFixed(3)}</p>
-                <p style={{ color: "var(--text-muted)" }}>PC2: {d.pc2.toFixed(3)}</p>
+                {isIndividualMember && (
+                  <p className="mb-0.5" style={{ color: "var(--text-muted)" }}>
+                    Record ID: <span className="font-medium">{String(d.recordId)}</span>
+                  </p>
+                )}
+                {d.pct != null && d.pct > 0 && (
+                  <p style={{ color: "var(--text-muted)" }}>{d.pct.toFixed(1)}% of population</p>
+                )}
+                <p style={{ color: "var(--text-muted)" }}>PC1: {d.pc1.toFixed(4)}</p>
+                <p style={{ color: "var(--text-muted)" }}>PC2: {d.pc2.toFixed(4)}</p>
+                {d.memberZScores && Object.keys(d.memberZScores).length > 0 && (
+                  <div className="mt-1.5 pt-1.5" style={{ borderTop: "1px solid var(--border)" }}>
+                    <p className="font-medium mb-0.5" style={{ color: "var(--text-muted)" }}>Feature Z-Scores</p>
+                    {Object.entries(d.memberZScores).slice(0, 6).map(([feat, z]) => (
+                      <p key={feat} style={{ color: "var(--text-muted)" }}>
+                        {feat}: <span style={{ color: z >= 0 ? "#16a34a" : "#e11d48", fontWeight: 600 }}>{z >= 0 ? "+" : ""}{z.toFixed(2)}</span>
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           }}
