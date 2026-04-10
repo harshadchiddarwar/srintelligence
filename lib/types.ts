@@ -24,6 +24,10 @@ export interface ChatMessage {
   suggestedFollowups?: string[];
   /** Structured forecast data — when set, renders ForecastArtifact instead of plain markdown */
   forecastData?: Record<string, unknown>;
+  /** Structured segmentation data — when set, renders SegmentationArtifact instead of plain markdown */
+  segmentData?: Record<string, unknown>;
+  /** Raw narrative text from the clustering agent — preserved so the component can extract z-scores */
+  clusterNarrative?: string;
 }
 
 export interface AgentActivity {

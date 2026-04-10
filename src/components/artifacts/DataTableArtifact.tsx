@@ -230,9 +230,9 @@ export default function DataTableArtifact({ artifact }: Props) {
                 }
               />
               <Tooltip
-                formatter={(value: number, name: string) => [
-                  value.toLocaleString(),
-                  name,
+                formatter={(value, name) => [
+                  typeof value === 'number' ? value.toLocaleString() : String(value ?? ''),
+                  String(name ?? ''),
                 ]}
               />
               {numericCols.map((col, i) => (

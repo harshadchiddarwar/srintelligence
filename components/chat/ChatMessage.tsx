@@ -8,6 +8,7 @@ import DataTable from "./DataTable";
 import InlineChart from "./InlineChart";
 import FeedbackButtons from "@/src/components/chat/FeedbackButtons";
 import ForecastArtifact from "@/src/components/artifacts/ForecastArtifact";
+import SegmentationArtifact from "@/src/components/artifacts/SegmentationArtifact";
 import type { AgentArtifact } from "@/src/types/agent";
 
 // ---------------------------------------------------------------------------
@@ -293,6 +294,19 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
                 intent: 'FORECAST_AUTO',
                 data: message.forecastData,
                 narrative: '',
+                createdAt: Date.now(),
+                lineageId: message.id,
+                cacheStatus: 'miss',
+              } as AgentArtifact}
+            />
+          ) : message.segmentData ? (
+            <SegmentationArtifact
+              artifact={{
+                id: message.id,
+                agentName: message.agentActivity?.routedTo ?? 'clustering',
+                intent: 'CLUSTER_GM',
+                data: message.segmentData,
+                narrative: message.clusterNarrative ?? message.content ?? '',
                 createdAt: Date.now(),
                 lineageId: message.id,
                 cacheStatus: 'miss',

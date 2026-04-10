@@ -10,6 +10,7 @@ import ChatMessageComponent from "@/components/chat/ChatMessage";
 import { ChatMessage, ChatThread } from "@/lib/types";
 import type { DispatchEvent, FormattedResponse, AgentArtifact } from "@/src/types/agent";
 import { parseForecastNarrative } from "@/src/components/artifacts/ForecastArtifact";
+import { fromV2ClusterData, fromResultTable, parseClusteringNarrative } from "@/src/components/artifacts/SegmentationArtifact";
 
 // ── Build a fresh empty thread ────────────────────────────────────────────────
 function emptyThread(id: string, title: string): ChatThread {
@@ -239,11 +240,13 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
 
   // Detect forecast intents — use structured rendering instead of raw markdown
   const isForecast = /^FORECAST_/.test(resp.intent);
+  // Detect clustering intents — use SegmentationArtifact instead of plain markdown
+  const isCluster = /^CLUSTER/.test(resp.intent);
 
-  let tableData  = (!isForecast && analystArtifact) ? artifactToTableData(analystArtifact)
-                 : (!isForecast && firstArtifact)   ? artifactToTableData(firstArtifact)
+  let tableData  = (!isForecast && !isCluster && analystArtifact) ? artifactToTableData(analystArtifact)
+                 : (!isForecast && !isCluster && firstArtifact)   ? artifactToTableData(firstArtifact)
                  : undefined;
-  const chartData  = (!isForecast && firstArtifact) ? artifactToChartData(firstArtifact) : undefined;
+  const chartData  = (!isForecast && !isCluster && firstArtifact) ? artifactToChartData(firstArtifact) : undefined;
 
   // Sort tableData rows by temporal column oldest → newest (MM/DD/YY format)
   if (tableData) {
@@ -255,6 +258,41 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
         return yy && mm && dd ? parseInt(`20${yy}${mm}${dd}`, 10) : 0;
       };
       tableData = { ...tableData, rows: [...tableData.rows].sort((a, b) => parseDateKey(a[tIdx]) - parseDateKey(b[tIdx])) };
+    }
+  }
+
+  // For cluster intents: build structured SegmentationData.
+  let segmentData: Record<string, unknown> | undefined;
+  if (isCluster) {
+    const artifactData = firstArtifact?.data as Record<string, unknown> | null | undefined;
+    if (artifactData && typeof artifactData === 'object' && Object.keys(artifactData).length > 0) {
+      // 1. Snowflake result table: { results: { headers: [...CLUSTER_ID, PC1, PC2, MODEL_METADATA...], rows } }
+      const fromTable = fromResultTable(artifactData);
+      if (fromTable) {
+        // Enrich with narrative descriptions
+        const narData = parseClusteringNarrative(resp.narrative ?? '');
+        for (const seg of fromTable.segments) {
+          const narSeg = narData.segments.find((ns) => ns.id === seg.id);
+          if (narSeg) {
+            if (!seg.description && narSeg.description) seg.description = narSeg.description;
+            if (!seg.topDriver   && narSeg.topDriver)   seg.topDriver   = narSeg.topDriver;
+          }
+        }
+        if (!fromTable.interpretation && narData.interpretation) fromTable.interpretation = narData.interpretation;
+        if (!fromTable.caveats?.length && narData.caveats?.length) fromTable.caveats = narData.caveats;
+        segmentData = fromTable as unknown as Record<string, unknown>;
+
+      // 2. v2 structured: { segments: [...] }
+      } else if (Array.isArray((artifactData)['segments'])) {
+        segmentData = fromV2ClusterData(artifactData) as unknown as Record<string, unknown>;
+
+      // 3. Pass through as-is (SegmentationArtifact will re-parse)
+      } else {
+        segmentData = artifactData;
+      }
+    } else {
+      // v3 named agent: parse narrative text
+      segmentData = parseClusteringNarrative(resp.narrative ?? '') as unknown as Record<string, unknown>;
     }
   }
 
@@ -295,27 +333,32 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
 
   // Map intent to a human-readable label (no "Cortex" exposure)
   const intentLabel: Record<string, string> = {
-    ANALYST:           "SRI Analytics Engine",
-    FORECAST_PROPHET:  "SRI Forecast · Prophet",
-    FORECAST_SARIMA:   "SRI Forecast · SARIMA",
-    FORECAST_HW:       "SRI Forecast · Holt-Winters",
-    FORECAST_XGBOOST:  "SRI Forecast · XGBoost",
-    FORECAST_AUTO:     "SRI Forecast · Auto",
-    FORECAST_COMPARE:  "SRI Forecast Comparison",
-    CLUSTER_GMM:       "SRI Clustering · GMM",
-    CLUSTER_KMEANS:    "SRI Clustering · K-Means",
-    CLUSTER_AUTO:      "SRI Clustering · Auto",
-    MTREE:             "SRI mTree™ Analytics",
-    CAUSAL:            "SRI Causal Inference",
-    PIPELINE:          "SRI Multi-Agent Pipeline",
-    UNKNOWN:           "SRI Analytics Engine",
+    ANALYST:                "SRI Analytics Engine",
+    FORECAST_PROPHET:       "SRI Forecast · Prophet",
+    FORECAST_SARIMA:        "SRI Forecast · SARIMA",
+    FORECAST_HW:            "SRI Forecast · Holt-Winters",
+    FORECAST_XGBOOST:       "SRI Forecast · XGBoost",
+    FORECAST_AUTO:          "SRI Forecast · Auto",
+    FORECAST_COMPARE:       "SRI Forecast Comparison",
+    CLUSTER:                "SRI Clustering",
+    CLUSTER_GM:             "SRI Clustering · GMM",
+    CLUSTER_GMM:            "SRI Clustering · GMM",
+    CLUSTER_KMEANS:         "SRI Clustering · K-Means",
+    CLUSTER_KMEDOIDS:       "SRI Clustering · K-Medoids",
+    CLUSTER_DBSCAN:         "SRI Clustering · DBSCAN",
+    CLUSTER_HIERARCHICAL:   "SRI Clustering · Hierarchical",
+    CLUSTER_COMPARE:        "SRI Clustering Comparison",
+    MTREE:                  "SRI mTree™ Analytics",
+    CAUSAL:                 "SRI Causal Inference",
+    PIPELINE:               "SRI Multi-Agent Pipeline",
+    UNKNOWN:                "SRI Analytics Engine",
   };
 
   const msg: ChatMessage = {
     id,
     role: "agent",
-    // For forecast messages suppress the raw narrative — ForecastArtifact renders it
-    content: isForecast ? "" : (resp.narrative || "Analysis complete."),
+    // For forecast / cluster messages suppress the raw narrative — the artifact component renders it
+    content: (isForecast || isCluster) ? "" : (resp.narrative || "Analysis complete."),
     agentActivity: {
       masterAgent: "SRIntelligence™ Master Agent",
       routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",
@@ -324,6 +367,9 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     tableData:          tableData ?? undefined,
     chartData:          chartData ?? undefined,
     forecastData:       forecastData,
+    segmentData:        segmentData,
+    // Preserve raw narrative text so SegmentationArtifact can extract z-scores client-side
+    clusterNarrative:   isCluster ? (resp.narrative ?? undefined) : undefined,
     suggestedFollowups: resp.suggestions ?? [],
   };
 
