@@ -2377,7 +2377,7 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
 }
 
 // ---------------------------------------------------------------------------
-// GMM Contour Plot (Gaussian Mixture Model)
+// GMM Contour Plot (Gaussian Mixture Model) — ellipse overlays
 // ---------------------------------------------------------------------------
 
 interface ContourEllipse {

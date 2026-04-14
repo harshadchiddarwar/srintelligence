@@ -139,6 +139,26 @@ interface ChatInputProps {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Find all [placeholder] spans in a string. Returns [{start, end, text}] */
+function findPlaceholders(text: string) {
+  const results: Array<{ start: number; end: number; text: string }> = [];
+  const re = /\[[^\]]+\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    results.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
+  }
+  return results;
+}
+
+/** Return true when a placeholder text looks like a feature list slot */
+function isFeaturePlaceholder(text: string) {
+  return /feature/i.test(text);
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -168,8 +188,15 @@ export default function ChatInput({
   const [inModelMenu, setInModelMenu] = useState(false);
   const [modelIdx, setModelIdx] = useState(0);
 
+  // Feature column picker
+  const [viewColumns, setViewColumns] = useState<string[]>([]);
+  const [featurePopup, setFeaturePopup] = useState(false);
+  const [featureQuery, setFeatureQuery] = useState("");
+  const [featureIdx, setFeatureIdx] = useState(0);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const featureListRef = useRef<HTMLDivElement>(null);
 
   // Prompt history cycling
   const historyIdxRef = useRef(-1);
@@ -200,6 +227,17 @@ export default function ChatInput({
       });
   }, []);
 
+  // Fetch columns when selected view changes
+  useEffect(() => {
+    if (!selectedViewId) return;
+    fetch(`/api/semantic-views/${selectedViewId}/columns`)
+      .then((r) => r.json())
+      .then((data: { columns?: string[] }) => {
+        setViewColumns(data.columns ?? []);
+      })
+      .catch(() => setViewColumns([]));
+  }, [selectedViewId]);
+
   useEffect(() => {
     if (autoFocus && textareaRef.current) textareaRef.current.focus();
   }, [autoFocus]);
@@ -223,6 +261,13 @@ export default function ChatInput({
     return () => document.removeEventListener("mousedown", handler);
   }, [showPicker]);
 
+  // Scroll selected feature into view
+  useEffect(() => {
+    if (!featurePopup || !featureListRef.current) return;
+    const item = featureListRef.current.children[featureIdx] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: "nearest" });
+  }, [featureIdx, featurePopup]);
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -231,6 +276,67 @@ export default function ChatInput({
     setAgentPopup(false);
     setSlashTwoPopup(false);
     setInModelMenu(false);
+    setFeaturePopup(false);
+  };
+
+  const filteredColumns = featureQuery
+    ? viewColumns.filter((c) => c.toLowerCase().includes(featureQuery.toLowerCase()))
+    : viewColumns;
+
+  /** Insert a column name, replacing the currently selected [feature...] bracket */
+  const insertColumn = (col: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const text = el.value;
+    const selStart = el.selectionStart;
+    const selEnd = el.selectionEnd;
+
+    // Replace the current bracket selection with the column name
+    const newText = text.slice(0, selStart) + col + text.slice(selEnd);
+    setValue(newText);
+    setFeaturePopup(false);
+    setFeatureQuery("");
+
+    // Place cursor after the inserted column
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) return;
+      const pos = selStart + col.length;
+      textareaRef.current.focus();
+      textareaRef.current.setSelectionRange(pos, pos);
+    });
+  };
+
+  /** Cycle to the next [placeholder] via Tab */
+  const cycleToNextPlaceholder = (e: { preventDefault: () => void }) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const text = el.value;
+    const placeholders = findPlaceholders(text);
+    if (placeholders.length === 0) return; // no template — let Tab behave normally
+
+    e.preventDefault();
+
+    const cursorEnd = el.selectionEnd;
+    const cursorStart = el.selectionStart;
+
+    // If cursor is inside a placeholder, find the next one after it
+    const insidePlaceholder = placeholders.find(
+      (p) => p.start <= cursorStart && p.end >= cursorEnd
+    );
+    const searchFrom = insidePlaceholder ? insidePlaceholder.end : cursorEnd;
+    const next =
+      placeholders.find((p) => p.start >= searchFrom) ?? placeholders[0];
+
+    el.setSelectionRange(next.start, next.end);
+
+    // Show feature popup when landing on a feature placeholder
+    if (isFeaturePlaceholder(next.text)) {
+      setFeaturePopup(true);
+      setFeatureQuery("");
+      setFeatureIdx(0);
+    } else {
+      setFeaturePopup(false);
+    }
   };
 
   const selectAgentModel = (aIdx: number, mIdx?: number) => {
@@ -282,6 +388,24 @@ export default function ChatInput({
     setValue(newVal);
     historyIdxRef.current = -1; // exit history cycling on any typing
 
+    // Close feature popup when text changes (user typed manually)
+    if (featurePopup) {
+      // Update the filter query based on what's inside the current bracket
+      const el = textareaRef.current;
+      if (el) {
+        const cursor = el.selectionEnd;
+        const before = newVal.slice(0, cursor);
+        const openIdx = before.lastIndexOf("[");
+        if (openIdx !== -1) {
+          const typed = before.slice(openIdx + 1);
+          setFeatureQuery(typed);
+          setFeatureIdx(0);
+        } else {
+          setFeaturePopup(false);
+        }
+      }
+    }
+
     if (newVal.endsWith("//")) {
       setSlashTwoPopup(true);
       setSlashTwoIdx(0);
@@ -293,7 +417,7 @@ export default function ChatInput({
       setInModelMenu(false);
       setModelIdx(0);
       setSlashTwoPopup(false);
-    } else {
+    } else if (!featurePopup) {
       closeAllPopups();
     }
   };
@@ -303,6 +427,52 @@ export default function ChatInput({
   // ---------------------------------------------------------------------------
 
   const handleKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // ── Feature column picker ───────────────────────────────────────────────
+    if (featurePopup && filteredColumns.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFeatureIdx((i) => Math.min(i + 1, filteredColumns.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFeatureIdx((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        insertColumn(filteredColumns[featureIdx]);
+        return;
+      }
+      if (e.key === "Tab") {
+        // Insert selected column then advance to next placeholder
+        e.preventDefault();
+        const col = filteredColumns[featureIdx];
+        const el = textareaRef.current;
+        if (!el) return;
+        const text = el.value;
+        const selStart = el.selectionStart;
+        const selEnd = el.selectionEnd;
+        const newText = text.slice(0, selStart) + col + text.slice(selEnd);
+        setValue(newText);
+        setFeaturePopup(false);
+        setFeatureQuery("");
+        requestAnimationFrame(() => {
+          if (!textareaRef.current) return;
+          textareaRef.current.value = newText;
+          const pos = selStart + col.length;
+          textareaRef.current.setSelectionRange(pos, pos);
+          cycleToNextPlaceholder({ preventDefault: () => {} });
+        });
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setFeaturePopup(false);
+        return;
+      }
+    }
+
     // ── "//" semantic model popup ───────────────────────────────────────────
     if (slashTwoPopup) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSlashTwoIdx((i) => Math.min(i + 1, views.length - 1)); return; }
@@ -342,6 +512,15 @@ export default function ChatInput({
       }
 
       if (e.key === "Escape") { closeAllPopups(); return; }
+    }
+
+    // ── Tab: cycle through [placeholders] ─────────────────────────────────
+    if (e.key === "Tab" && !agentPopup && !slashTwoPopup) {
+      const placeholders = findPlaceholders(value);
+      if (placeholders.length > 0) {
+        cycleToNextPlaceholder(e);
+        return;
+      }
     }
 
     // ── Prompt history cycling ─────────────────────────────────────────────
@@ -511,6 +690,57 @@ export default function ChatInput({
         </div>
       )}
 
+      {/* Feature column picker popup ───────────────────────────────────── */}
+      {featurePopup && viewColumns.length > 0 && (
+        <div
+          className="absolute bottom-full left-0 mb-1 z-50 rounded-xl shadow-xl overflow-hidden"
+          style={{ background: "#ffffff", border: "1px solid var(--border)", minWidth: 260, maxWidth: 340 }}
+        >
+          <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
+            <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+              Available columns
+              <span className="ml-1.5 font-normal" style={{ color: "var(--text-muted)" }}>
+                ({filteredColumns.length}{featureQuery ? ` of ${viewColumns.length}` : ""})
+              </span>
+            </p>
+            <p style={{ fontSize: "10px", color: "var(--text-muted)" }}>
+              Type to filter · ↑↓ navigate · Enter or Tab to insert · Esc dismiss
+            </p>
+          </div>
+          <div
+            ref={featureListRef}
+            style={{ maxHeight: 220, overflowY: "auto" }}
+          >
+            {filteredColumns.length === 0 ? (
+              <p className="px-3 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                No columns match &ldquo;{featureQuery}&rdquo;
+              </p>
+            ) : (
+              filteredColumns.map((col, i) => (
+                <button
+                  key={col}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors"
+                  style={{
+                    background: i === featureIdx ? "var(--accent-dim)" : "transparent",
+                    borderBottom: i < filteredColumns.length - 1 ? "1px solid var(--border)" : "none",
+                  }}
+                  onMouseEnter={() => setFeatureIdx(i)}
+                  onClick={() => insertColumn(col)}
+                >
+                  <span
+                    className="font-mono text-xs px-1.5 py-0.5 rounded"
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)", fontSize: "10px" }}
+                  >
+                    col
+                  </span>
+                  <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>{col}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Input box ────────────────────────────────────────────────────────── */}
       <div
         className="flex items-end gap-3 rounded-xl px-4 py-3"
@@ -623,6 +853,15 @@ export default function ChatInput({
             >//</kbd>
             <span>select semantic model</span>
           </span>
+          {findPlaceholders(value).length > 0 && (
+            <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
+              <kbd
+                className="px-1 py-0.5 rounded text-xs font-mono"
+                style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
+              >Tab</kbd>
+              <span>next field</span>
+            </span>
+          )}
         </div>
       )}
     </div>
