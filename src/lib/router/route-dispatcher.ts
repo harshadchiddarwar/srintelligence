@@ -803,11 +803,12 @@ export class RouteDispatcher {
 
     // Pass last few conversation turns so Cortex Analyst understands the
     // follow-on context (e.g. "cluster those physicians").
+    // AnalystMessage.content must be Array<{type,text}>, NOT a plain string.
     const clusterHistory = this.context.conversationHistory
       .slice(-6)
       .map((m) => ({
         role: (m.role === 'assistant' ? 'analyst' : 'user') as 'user' | 'analyst',
-        content: m.content,
+        content: [{ type: 'text', text: m.content }],
       }));
 
     console.time(`5a_CLUSTER_ANALYST:${reqId}`);
