@@ -155,10 +155,26 @@ export class ExecutionContext implements AgentContext {
   getLastAnalystColumns(): string[] | undefined {
     for (const [, result] of this.intermediateResults) {
       if (result.artifact?.intent === 'ANALYST') {
-        const data = result.artifact.data;
-        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object') {
-          return Object.keys(data[0] as Record<string, unknown>);
-        }
+        const data = result.artifact.data as Record<string, unknown> | undefined;
+        // Analyst data shape: { results: { headers: string[], rows: ... } }
+        const headers = (data?.['results'] as { headers?: string[] } | undefined)?.headers;
+        if (Array.isArray(headers) && headers.length > 0) return headers;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Returns the SQL and output column names from the most recent ANALYST result.
+   * Used by the clustering dispatcher to scope RECORD_ID + FEATURES to a
+   * prior analyst cohort without re-querying Cortex Analyst.
+   */
+  getLastAnalystResult(): { sql: string; columns: string[] } | undefined {
+    for (const [, result] of this.intermediateResults) {
+      if (result.artifact?.intent === 'ANALYST' && result.artifact.sql) {
+        const data = result.artifact.data as Record<string, unknown> | undefined;
+        const headers = (data?.['results'] as { headers?: string[] } | undefined)?.headers ?? [];
+        return { sql: result.artifact.sql, columns: headers };
       }
     }
     return undefined;

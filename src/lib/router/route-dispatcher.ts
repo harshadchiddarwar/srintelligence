@@ -242,6 +242,61 @@ function buildClusterUDTFSQL(intent: AgentIntent, inputQuery: string, nClusters:
 }
 
 /**
+ * Build a RECORD_ID + FEATURES SELECT directly from a prior analyst SQL result,
+ * without calling Cortex Analyst again. This preserves the exact cohort (same
+ * WHERE / HAVING / LIMIT as the prior query) rather than letting Cortex Analyst
+ * re-interpret the population from a NL hint.
+ *
+ * The prior SQL is wrapped as a CTE (_prior_cohort), and we derive:
+ *   RECORD_ID — first column that looks like an entity key (contains KEY, ID, NPI, GID, etc.)
+ *   FEATURES  — all remaining numeric-sounding columns packed with OBJECT_CONSTRUCT
+ *
+ * Returns null when the prior result doesn't contain suitable columns (falls back
+ * to the Cortex Analyst path).
+ */
+function buildCohortClusterSQL(priorSQL: string, priorColumns: string[]): string | null {
+  if (priorColumns.length < 2) return null;
+
+  // Detect the entity ID column — prefer explicit key/id patterns
+  const ID_PATTERNS = /key|_id$|^id_|^npi|gid|identifier|code$/i;
+  const SKIP_PATTERNS = /name|desc|label|date|year|month|quarter|day|state|type|category|status|flag/i;
+
+  const idCol = priorColumns.find(c => ID_PATTERNS.test(c))
+    ?? priorColumns[0]; // fallback: first column
+
+  // Feature columns: everything that isn't the ID and doesn't look like a dimension
+  const featureCols = priorColumns.filter(
+    c => c !== idCol && !SKIP_PATTERNS.test(c),
+  );
+
+  if (featureCols.length === 0) {
+    // No numeric-looking columns — use all non-ID columns
+    featureCols.push(...priorColumns.filter(c => c !== idCol));
+  }
+  if (featureCols.length === 0) return null;
+
+  const objectArgs = featureCols
+    .map(c => `    '${c}', TRY_CAST(${c} AS FLOAT)`)
+    .join(',\n');
+
+  const inner = priorSQL.replace(/;/g, '').trim();
+
+  return [
+    `WITH _prior_cohort AS (`,
+    inner,
+    `)`,
+    `SELECT`,
+    `  CAST(${idCol} AS VARCHAR) AS RECORD_ID,`,
+    `  OBJECT_CONSTRUCT(`,
+    objectArgs,
+    `  )::VARIANT AS FEATURES`,
+    `FROM _prior_cohort`,
+    `WHERE ${idCol} IS NOT NULL`,
+    `LIMIT 10000`,
+  ].join('\n');
+}
+
+/**
  * Build a Cortex Analyst question that asks for a clustering input query.
  *
  * The analyst must produce a standalone SELECT with exactly 2 columns:
@@ -795,56 +850,66 @@ export class RouteDispatcher {
       `(${nClusters === 0 ? 'auto-detect' : 'user-specified'})`,
     );
 
-    // ── Step 1: Cortex Analyst → RECORD_ID + FEATURES input query ──────────
-    // If the user identified a cohort in a prior ANALYST turn, pass that user's
-    // NL question as a population-filter hint. Cortex Analyst is a semantic
-    // text-to-SQL model — it understands NL criteria but cannot consume raw
-    // SQL CTEs, so we pass the original question rather than the generated SQL.
-    const history = this.context.conversationHistory;
-    const lastAnalystIdx = [...history].reverse().findIndex(
-      (m) => m.role === 'assistant' && m.intent === 'ANALYST',
-    );
-    const priorUserQuestion = lastAnalystIdx >= 0
-      ? [...history].reverse().slice(lastAnalystIdx + 1).find((m) => m.role === 'user')?.content
-      : undefined;
-    if (priorUserQuestion) {
-      console.log(`[CLUSTER] Prior user question for cohort: ${priorUserQuestion.slice(0, 150)}`);
-    }
-    const analystQuestion = buildClusterInputQuestion(message, nClusters, priorUserQuestion);
+    // ── Step 1: RECORD_ID + FEATURES input query ────────────────────────────
+    // PATH 1A — Prior ANALYST cohort exists: build the RECORD_ID + FEATURES
+    //   SQL directly from the prior result (exact same WHERE / HAVING / LIMIT).
+    //   This guarantees clustering runs on exactly the identified cohort without
+    //   Cortex Analyst re-interpreting the population from a NL hint.
+    // PATH 1B — No prior cohort: ask Cortex Analyst to generate the query.
+    let inputQuery: string;
 
-    // Pass last few conversation turns so Cortex Analyst understands the
-    // follow-on context (e.g. "cluster those physicians").
-    // AnalystMessage.content must be Array<{type,text}>, NOT a plain string.
-    const clusterHistory = this.context.conversationHistory
-      .slice(-6)
-      .map((m) => ({
-        role: (m.role === 'assistant' ? 'analyst' : 'user') as 'user' | 'analyst',
-        content: [{ type: 'text', text: m.content }],
-      }));
-
-    console.time(`5a_CLUSTER_ANALYST:${reqId}`);
-    let analystResp: Awaited<ReturnType<typeof callCortexAnalyst>>;
-    try {
-      analystResp = await callCortexAnalyst({
-        question: analystQuestion,
-        semanticView: baseInput.semanticView.fullyQualifiedName,
-        conversationHistory: clusterHistory.length > 0 ? clusterHistory : undefined,
-        signal,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[CLUSTER] Cortex Analyst call failed: ${msg}`);
-      return buildAgentResult('', intent, agentName, '', undefined, null, Date.now() - startMs, lineageId, `Cortex Analyst error: ${msg}`);
-    }
-    console.timeEnd(`5a_CLUSTER_ANALYST:${reqId}`);
-
-    if (analystResp.error || !analystResp.sql) {
-      const errMsg = analystResp.error ?? 'Cortex Analyst did not return SQL for the clustering input query';
-      console.error(`[CLUSTER] Analyst error: ${errMsg}`);
-      return buildAgentResult('', intent, agentName, '', undefined, null, Date.now() - startMs, lineageId, errMsg);
+    const priorAnalyst = this.context.getLastAnalystResult?.();
+    if (priorAnalyst?.sql && priorAnalyst.columns.length > 0) {
+      console.log(`[CLUSTER] Prior cohort detected (${priorAnalyst.columns.length} cols). Building RECORD_ID+FEATURES from prior SQL directly.`);
+      const cohortSQL = buildCohortClusterSQL(priorAnalyst.sql, priorAnalyst.columns);
+      if (cohortSQL) {
+        console.log(`[CLUSTER] Cohort SQL (first 300): ${cohortSQL.slice(0, 300)}`);
+        inputQuery = cohortSQL;
+      } else {
+        console.log(`[CLUSTER] Could not derive cohort SQL — falling back to Cortex Analyst.`);
+        // Fall through to PATH 1B below
+        inputQuery = '';
+      }
+    } else {
+      inputQuery = '';
     }
 
-    const inputQuery = analystResp.sql.trim().replace(/;\s*$/, '');
+    if (!inputQuery) {
+      // PATH 1B — Cortex Analyst generates the RECORD_ID + FEATURES query.
+      // Pass conversation history so it understands follow-on context like
+      // "cluster those physicians". Content must be Array<{type,text}>.
+      const clusterHistory = this.context.conversationHistory
+        .slice(-6)
+        .map((m) => ({
+          role: (m.role === 'assistant' ? 'analyst' : 'user') as 'user' | 'analyst',
+          content: [{ type: 'text', text: m.content }],
+        }));
+
+      const analystQuestion = buildClusterInputQuestion(message, nClusters);
+      console.time(`5a_CLUSTER_ANALYST:${reqId}`);
+      let analystResp: Awaited<ReturnType<typeof callCortexAnalyst>>;
+      try {
+        analystResp = await callCortexAnalyst({
+          question: analystQuestion,
+          semanticView: baseInput.semanticView.fullyQualifiedName,
+          conversationHistory: clusterHistory.length > 0 ? clusterHistory : undefined,
+          signal,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[CLUSTER] Cortex Analyst call failed: ${msg}`);
+        return buildAgentResult('', intent, agentName, '', undefined, null, Date.now() - startMs, lineageId, `Cortex Analyst error: ${msg}`);
+      }
+      console.timeEnd(`5a_CLUSTER_ANALYST:${reqId}`);
+
+      if (analystResp.error || !analystResp.sql) {
+        const errMsg = analystResp.error ?? 'Cortex Analyst did not return SQL for the clustering input query';
+        console.error(`[CLUSTER] Analyst error: ${errMsg}`);
+        return buildAgentResult('', intent, agentName, '', undefined, null, Date.now() - startMs, lineageId, errMsg);
+      }
+      inputQuery = analystResp.sql.trim().replace(/;\s*$/, '');
+    }
+
     console.log(`[CLUSTER] Input query (first 300): ${inputQuery.slice(0, 300)}`);
 
     // ── Step 2: Wrap input query in UDTF SELECT...TABLE()...OVER() ──────────
