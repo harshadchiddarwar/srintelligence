@@ -1727,7 +1727,7 @@ function ModelFeaturesCard({
             label="Flagged sparse — kept as-is"
             sublabel="Identified as sparse but retained in their original form without re-encoding."
             features={flaggedSparse}
-            tagStyle={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", fontWeight: 500 }}
+            tagStyle={{ background: "var(--bg-primary, #f5f5f5)", color: "var(--text-muted)", border: "1px solid var(--border)", fontWeight: 500 }}
           />
 
           {/* ── 5. Dropped low variance ───────────────────────────────────── */}
