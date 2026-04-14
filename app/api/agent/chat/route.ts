@@ -30,6 +30,8 @@ export async function POST(request: Request): Promise<Response> {
     sessionId?: string;
     semanticViewId?: string;
     bypassCache?: boolean;
+    priorAnalystSQL?: string;
+    priorAnalystColumns?: string[];
   };
 
   try {
@@ -104,6 +106,39 @@ export async function POST(request: Request): Promise<Response> {
 
   if (semanticView) context.semanticView = semanticView;
   context.bypassCache = bypassCache;
+
+  // ── Cohort handoff: seed intermediateResults from client if server lost them ──
+  // The client persists the last ANALYST SQL + column headers in localStorage.
+  // On a fresh session (e.g. after server restart) intermediateResults is empty,
+  // so getLastAnalystResult() would return undefined and clustering / forecasting
+  // would generate a fresh broad query instead of scoping to the prior cohort.
+  // Re-seeding here ensures the dispatcher always has the cohort available.
+  const priorSQL  = body.priorAnalystSQL;
+  const priorCols = body.priorAnalystColumns;
+  if (
+    priorSQL &&
+    Array.isArray(priorCols) &&
+    priorCols.length > 0 &&
+    !context.getResult('ANALYST_prior')
+  ) {
+    context.storeResult('ANALYST_prior', {
+      success:     true,
+      durationMs:  0,
+      retryCount:  0,
+      artifact: {
+        id:          'prior',
+        agentName:   'analyst',
+        intent:      'ANALYST',
+        sql:         priorSQL,
+        data:        { results: { headers: priorCols, rows: [] } },
+        narrative:   '',
+        createdAt:   Date.now(),
+        lineageId:   '',
+        cacheStatus: 'miss',
+      },
+    });
+    console.log(`[COHORT] Seeded intermediateResults from client — ${priorCols.length} columns`);
+  }
 
   const dispatcher = new RouteDispatcher(context);
 

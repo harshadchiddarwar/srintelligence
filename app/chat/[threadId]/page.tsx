@@ -479,6 +479,15 @@ export default function ThreadPage() {
     abortRef.current = controller;
 
     try {
+      // ── Cohort handoff: find last ANALYST result and pass SQL + columns ──────
+      // This ensures clustering / forecasting / causal agents scope to the same
+      // cohort even if the server restarted and lost in-memory intermediateResults.
+      const lastAnalystMsg = [...thread.messages]
+        .reverse()
+        .find((m) => m.role === "agent" && sqlMap[m.id]);
+      const priorAnalystSQL     = lastAnalystMsg ? sqlMap[lastAnalystMsg.id] : undefined;
+      const priorAnalystColumns = lastAnalystMsg?.tableData?.headers;
+
       const res = await fetch("/api/agent/chat", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
@@ -486,6 +495,8 @@ export default function ThreadPage() {
         body: JSON.stringify({
           message:   query,
           sessionId: sessionIdRef.current,
+          ...(priorAnalystSQL     ? { priorAnalystSQL }     : {}),
+          ...(priorAnalystColumns ? { priorAnalystColumns } : {}),
         }),
       });
 
