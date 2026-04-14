@@ -9,10 +9,15 @@
 
 /**
  * KMeansClusterAgent — K-Means clustering via
- * CORTEX_TESTING.ML.CLUSTER_KMEANS table-valued function.
+ * CORTEX_TESTING.ML.KMEANS_CLUSTER stored procedure.
  *
- * SQL pattern (ALWAYS use TABLE(), NEVER CALL):
- *   SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_KMEANS(CURSOR(...), n_clusters, max_iter))
+ * SQL pattern — ALWAYS use CALL with a dollar-quoted input query string:
+ *   CALL CORTEX_TESTING.ML.KMEANS_CLUSTER($$<input_query>$$, n_clusters)
+ *
+ * The procedure accepts the source SELECT as a VARCHAR parameter (dollar-quoted
+ * to handle embedded single quotes) and the requested cluster count as an INT.
+ * Pass 0 to let the procedure auto-detect the optimum k.
+ * Results are written to CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS.
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
@@ -44,19 +49,10 @@ export class KMeansClusterAgent extends BaseAgent {
   buildSQL(input: AgentInput): string {
     const sourceSQL = input.extraContext!.sourceSQL as string;
     const nClusters = (input.extraContext?.nSegments as number | undefined) ?? DEFAULT_N_CLUSTERS;
-    const maxIter = (input.extraContext?.maxIter as number | undefined) ?? DEFAULT_MAX_ITER;
 
-    return [
-      `WITH SOURCE_DATA AS (`,
-      sourceSQL.trim(),
-      `)`,
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_KMEANS(`,
-      `  CURSOR(SELECT * FROM SOURCE_DATA),`,
-      `  ${nClusters},`,
-      `  ${maxIter}`,
-      `))`,
-      `ORDER BY CLUSTER_ID`,
-    ].join('\n');
+    // Procedures are called with CALL, not SELECT * FROM TABLE().
+    // The input query is passed as a dollar-quoted VARCHAR; n_clusters=0 → auto-detect.
+    return `CALL CORTEX_TESTING.ML.KMeans_Cluster($$${sourceSQL.trim()}$$, ${nClusters})`;
   }
 
   parseResults(

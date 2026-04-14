@@ -9,13 +9,15 @@
 
 /**
  * ClusterGMAgent — Gaussian Mixture Model clustering via
- * CORTEX_TESTING.ML.CLUSTER_GM table-valued function.
+ * CORTEX_TESTING.ML.GM_CLUSTER stored procedure.
  *
- * SQL pattern (ALWAYS use TABLE(), NEVER CALL):
- *   SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_GM(CURSOR(...), n_clusters))
+ * SQL pattern — ALWAYS use CALL with a dollar-quoted input query string:
+ *   CALL CORTEX_TESTING.ML.GM_CLUSTER($$<input_query>$$, n_clusters)
  *
- * The function returns one row per input record with an added CLUSTER_ID column.
- * parseResults aggregates these into per-cluster segment profiles.
+ * The procedure accepts the source SELECT as a VARCHAR parameter (dollar-quoted
+ * to handle embedded single quotes) and the requested cluster count as an INT.
+ * Pass 0 to let the procedure auto-detect the optimum k via BIC/AIC.
+ * Results are written to CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS.
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
@@ -63,16 +65,9 @@ export class ClusterGMAgent extends BaseAgent {
     const sourceSQL = input.extraContext!.sourceSQL as string;
     const nClusters = (input.extraContext?.nSegments as number | undefined) ?? DEFAULT_N_CLUSTERS;
 
-    return [
-      `WITH SOURCE_DATA AS (`,
-      sourceSQL.trim(),
-      `)`,
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_GM(`,
-      `  CURSOR(SELECT * FROM SOURCE_DATA),`,
-      `  ${nClusters}`,
-      `))`,
-      `ORDER BY CLUSTER_ID`,
-    ].join('\n');
+    // Procedures are called with CALL, not SELECT * FROM TABLE().
+    // The input query is passed as a dollar-quoted VARCHAR; n_clusters=0 → auto-detect.
+    return `CALL CORTEX_TESTING.ML.Cluster_GM($$${sourceSQL.trim()}$$, ${nClusters})`;
   }
 
   // -------------------------------------------------------------------------

@@ -9,12 +9,13 @@
 
 /**
  * HierarchicalClusterAgent — agglomerative hierarchical clustering via
- * CORTEX_TESTING.ML.CLUSTER_HIERARCHICAL table-valued function.
+ * CORTEX_TESTING.ML.HIERARCHICAL_CLUSTER stored procedure.
  *
- * SQL pattern (ALWAYS use TABLE(), NEVER CALL):
- *   SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_HIERARCHICAL(CURSOR(...), n_clusters, linkage))
+ * SQL pattern — ALWAYS use CALL with a dollar-quoted input query string:
+ *   CALL CORTEX_TESTING.ML.HIERARCHICAL_CLUSTER($$<input_query>$$, n_clusters)
  *
- * Linkage options: 'ward' (default), 'complete', 'average', 'single'
+ * Pass 0 to let the procedure auto-detect the optimum cut height.
+ * Results are written to CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS.
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
@@ -51,19 +52,10 @@ export class HierarchicalClusterAgent extends BaseAgent {
   buildSQL(input: AgentInput): string {
     const sourceSQL = input.extraContext!.sourceSQL as string;
     const nClusters = (input.extraContext?.nSegments as number | undefined) ?? DEFAULT_N_CLUSTERS;
-    const linkage = ((input.extraContext?.linkage as string | undefined) ?? DEFAULT_LINKAGE).toLowerCase();
 
-    return [
-      `WITH SOURCE_DATA AS (`,
-      sourceSQL.trim(),
-      `)`,
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_HIERARCHICAL(`,
-      `  CURSOR(SELECT * FROM SOURCE_DATA),`,
-      `  ${nClusters},`,
-      `  '${linkage}'`,
-      `))`,
-      `ORDER BY CLUSTER_ID`,
-    ].join('\n');
+    // Procedures are called with CALL, not SELECT * FROM TABLE().
+    // The input query is passed as a dollar-quoted VARCHAR; n_clusters=0 → auto-detect.
+    return `CALL CORTEX_TESTING.ML.Hierarchical_cluster($$${sourceSQL.trim()}$$, ${nClusters})`;
   }
 
   parseResults(

@@ -9,13 +9,14 @@
 
 /**
  * DBSCANClusterAgent — density-based spatial clustering via
- * CORTEX_TESTING.ML.CLUSTER_DBSCAN table-valued function.
+ * CORTEX_TESTING.ML.DBSCAN_CLUSTER stored procedure.
  *
- * SQL pattern (ALWAYS use TABLE(), NEVER CALL):
- *   SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_DBSCAN(CURSOR(...), eps, min_samples))
+ * SQL pattern — ALWAYS use CALL with a dollar-quoted input query string:
+ *   CALL CORTEX_TESTING.ML.DBSCAN_CLUSTER($$<input_query>$$, n_clusters)
  *
- * DBSCAN does not require specifying the number of clusters in advance.
- * Cluster IDs of -1 indicate noise/outlier points.
+ * DBSCAN auto-detects clusters — pass n_clusters=0 (the procedure tunes
+ * eps and min_samples internally). Cluster IDs of -1 indicate noise/outliers.
+ * Results are written to CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS.
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
@@ -61,17 +62,9 @@ export class DBSCANClusterAgent extends BaseAgent {
     const eps = (input.extraContext?.eps as number | undefined) ?? DEFAULT_EPS;
     const minSamples = (input.extraContext?.minSamples as number | undefined) ?? DEFAULT_MIN_SAMPLES;
 
-    return [
-      `WITH SOURCE_DATA AS (`,
-      sourceSQL.trim(),
-      `)`,
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_DBSCAN(`,
-      `  CURSOR(SELECT * FROM SOURCE_DATA),`,
-      `  ${eps},`,
-      `  ${minSamples}`,
-      `))`,
-      `ORDER BY CLUSTER_ID`,
-    ].join('\n');
+    // DBSCAN has a different signature: (INPUT_QUERY, EPS_VALUE, MIN_SAMPLES)
+    // Pass 0.0 for eps to let the procedure auto-tune via k-distance heuristic.
+    return `CALL CORTEX_TESTING.ML.DBScan_cluster($$${sourceSQL.trim()}$$, ${eps}, ${minSamples})`;
   }
 
   parseResults(

@@ -91,7 +91,14 @@ export async function callCortexAnalyst(params: {
       method: 'POST',
       headers,
       signal,
-      body: JSON.stringify({ messages, semantic_view: semanticView }),
+      // Stage-based YAML models use `semantic_model_file` (@DB.SCHEMA.STAGE/file.yaml).
+      // Named Snowflake semantic views use `semantic_view` (DB.SCHEMA.VIEW).
+      body: JSON.stringify({
+        messages,
+        ...(semanticView.startsWith('@')
+          ? { semantic_model_file: semanticView }
+          : { semantic_view: semanticView }),
+      }),
     });
   } catch (fetchErr) {
     return {

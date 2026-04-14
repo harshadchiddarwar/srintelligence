@@ -43,6 +43,24 @@ const FORECAST_INTENTS = new Set<AgentIntent>([
   'FORECAST_AUTO',
 ]);
 
+const CLUSTER_INTENTS = new Set<AgentIntent>([
+  'CLUSTER',
+  'CLUSTER_KMEANS',
+  'CLUSTER_DBSCAN',
+  'CLUSTER_GM',
+  'CLUSTER_HIERARCHICAL',
+  'CLUSTER_KMEDOIDS',
+  'CLUSTER_COMPARE',
+]);
+
+/**
+ * Matches explicit new clustering requests (verb-context).
+ * Used to distinguish a genuine re-cluster request from a follow-up question
+ * that merely contains the words "segment", "cluster", "group" as nouns.
+ */
+const NEW_CLUSTER_REQUEST_RE =
+  /\b(?:cluster(?:ing)?|segment(?:ation)?)\s+(?:the\s+data|this\s+data|these\s+records|by\b|into\b|analysis\b|patients\b|customers\b|records\b|data\b|members\b|claims\b|users\b|physicians\b|drugs\b|population\b)\b|\b(?:run|perform|do|create|find|identify|apply)\s+(?:a\s+)?(?:cluster(?:ing)?|segmentation|grouping)\b/i;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -70,6 +88,22 @@ export async function classifyIntent(params: {
       confidence: 'deterministic',
       matchedPatterns: ['follow-up: forecast (that|this|those|them)'],
     };
+  }
+
+  // ------------------------------------------------------------------
+  // Follow-up cluster suppression:
+  // After a CLUSTER turn, messages that mention "segment/cluster/group"
+  // as nouns (not as an action verb) should go to ANALYST for Q&A,
+  // not trigger a new clustering run.
+  // ------------------------------------------------------------------
+  if (priorIntents.some((i) => CLUSTER_INTENTS.has(i))) {
+    if (!NEW_CLUSTER_REQUEST_RE.test(message)) {
+      return {
+        intent: 'ANALYST',
+        confidence: 'deterministic',
+        matchedPatterns: ['follow-up: post-cluster question → ANALYST'],
+      };
+    }
   }
 
   // ------------------------------------------------------------------

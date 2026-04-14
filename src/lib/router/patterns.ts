@@ -67,13 +67,17 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     description: 'Explicit: Forecast / XGBoost',
   },
   {
-    pattern: /@Forecast\b/i,
+    // Negative lookahead (?!\/) ensures @Forecast/Prophet, /SARIMA, etc. are NOT
+    // matched here — only a bare @Forecast tag with no sub-model suffix.
+    pattern: /@Forecast(?!\/)\b/i,
     intent: 'FORECAST_AUTO',
     priority: 105,
     description: 'Explicit: Forecast (auto-select model)',
   },
   {
-    pattern: /@Clustering\b/i,
+    // Negative lookahead (?!\/) ensures @Clustering/GMM, /KMeans, etc. are NOT
+    // matched here — only a bare @Clustering tag with no sub-algorithm suffix.
+    pattern: /@Clustering(?!\/)\b/i,
     intent: 'CLUSTER',
     priority: 110,
     description: 'Explicit: Clustering agent (auto)',
@@ -121,7 +125,8 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
     description: 'Explicit: Hybrid ensemble forecast',
   },
   {
-    pattern: /@Causal\b/i,
+    // Negative lookahead (?!\/) ensures @Causal/Contribution etc. are NOT matched here.
+    pattern: /@Causal(?!\/)\b/i,
     intent: 'CAUSAL_AUTO',
     priority: 110,
     description: 'Explicit: Causal inference (auto)',
@@ -294,10 +299,13 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
   // Priority 90: Root-cause / driver / metric-tree / clustering / causal
   // -------------------------------------------------------------------------
   {
-    pattern: /\b(segment|cluster|group(?:ing)?|cohort|partition)\b/i,
+    // Requires clustering as a verb/action or an explicit compound noun — avoids
+    // triggering on noun references like "which segment is largest?" in follow-up.
+    pattern:
+      /\b(?:cluster(?:ing)?|segment(?:ation)?)\s+(?:the\s+data|this\s+data|these\s+records|by\b|into\b|analysis\b|patients\b|customers\b|records\b|data\b|members\b|claims\b|users\b|physicians\b|drugs\b|population\b)\b|\b(?:run|perform|do|create|find|identify|apply)\s+(?:a\s+)?(?:cluster(?:ing)?|segmentation|grouping)\b/i,
     intent: 'CLUSTER',
     priority: 90,
-    description: 'Segmentation / clustering analysis',
+    description: 'Segmentation / clustering analysis (verb-context only)',
   },
   {
     pattern:

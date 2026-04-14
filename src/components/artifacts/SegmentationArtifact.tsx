@@ -1,10 +1,13 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   ScatterChart,
   Scatter,
+  BarChart,
+  Bar,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -14,6 +17,7 @@ import {
   LineChart,
   Line,
   ReferenceLine,
+  Customized,
 } from "recharts";
 import type { ScatterShapeProps } from "recharts";
 import {
@@ -25,6 +29,10 @@ import {
   Activity,
   AlertCircle,
   Table2,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import type { AgentArtifact } from "@/src/types/agent";
 
@@ -57,6 +65,9 @@ export interface PcaPoint {
   pct?: number;           // segment membership % (for centroid/bubble mode tooltip)
   recordId?: string | number; // individual member record ID (from RECORD_ID column)
   memberZScores?: Record<string, number>; // per-member feature z-scores (from FEATURE_ZSCORES column)
+  probability?: number;   // CLUSTER_PROBABILITY — soft membership probability (0–1)
+  entropy?: number;       // CLUSTER_ENTROPY — assignment uncertainty (0 = certain, 1 = max uncertain)
+  isNoise?: boolean;      // true for DBSCAN noise points (CLUSTER_ID = -1)
 }
 
 export interface MemberRecord {
@@ -89,8 +100,19 @@ export interface SegmentationData {
   clusterCountMethod?: "auto" | "user";
   silhouetteScore?: number;
   confidenceLevel?: number;
-  /** Human-readable confidence label from Snowflake (e.g. "High", "Medium", "Low") */
+  /** Human-readable confidence label from Snowflake (e.g. "High", "Moderate", "Low") */
   confidenceLabel?: string;
+  /** Algorithm-specific parameters from metadata.algorithm_params */
+  algorithmParams?: Record<string, unknown>;
+  /** Feature weighting pipeline info from metadata.feature_weighting */
+  featureWeighting?: {
+    method?: string;
+    finalWeights?: Record<string, number>;
+    /** Entropy-derived weights — used as fallback when finalWeights is absent */
+    entropyWeights?: Record<string, number>;
+    rfOobScore?: number | null;
+    draftSilhouette?: number | null;
+  };
   interpretation?: string;
   segments: SegmentProfile[];
   pcaPoints?: PcaPoint[];
@@ -103,22 +125,49 @@ export interface SegmentationData {
   pc2TopFeatures?: string[];
   membershipTable?: MemberRecord[];
   caveats?: string[];
+  /** Run-level metadata from Snowflake result table */
+  runId?: string;
+  runTimestamp?: string;
+  userName?: string;
+  /** Requested vs actual segment count (may differ for auto-K algorithms) */
+  nSegmentsRequested?: number;
+  nSegmentsUsed?: number;
+  /** Combined variance captured by PC1+PC2 (0–1 fraction) */
+  cumulativeVariance?: number;
+  /** K-Medoids medoid positions in PCA space (one per cluster) */
+  medoidPoints?: Array<{ cluster: number; pc1: number; pc2: number }>;
 }
 
 // ---------------------------------------------------------------------------
-// Color palette — 8 unique palettes (bg, border, accent, text)
+// Color palette — Tableau-10 (spec-compliant, indexed by cluster ID)
+// Cluster -1 (DBSCAN noise) → light gray
 // ---------------------------------------------------------------------------
 
 const PALETTES = [
-  { bg: "#eff6ff", border: "#bfdbfe", accent: "#3b82f6", text: "#1d4ed8" },   // blue
-  { bg: "#f5f3ff", border: "#ddd6fe", accent: "#7c3aed", text: "#5b21b6" },   // violet
-  { bg: "#f0fdf4", border: "#bbf7d0", accent: "#16a34a", text: "#15803d" },   // green
-  { bg: "#fff7ed", border: "#fed7aa", accent: "#ea580c", text: "#c2410c" },   // orange
-  { bg: "#fdf2f8", border: "#f5d0fe", accent: "#a21caf", text: "#86198f" },   // pink
-  { bg: "#ecfeff", border: "#a5f3fc", accent: "#0891b2", text: "#0e7490" },   // cyan
-  { bg: "#fefce8", border: "#fde68a", accent: "#ca8a04", text: "#a16207" },   // yellow
-  { bg: "#fff1f2", border: "#fecdd3", accent: "#e11d48", text: "#be123c" },   // rose
+  { bg: "#EEF2F7", border: "#C8D8E8", accent: "#4E79A7", text: "#2D5480" },   // 0 Blue
+  { bg: "#FEF5EB", border: "#FBDDB3", accent: "#F28E2B", text: "#C06B0F" },   // 1 Orange
+  { bg: "#EEF5ED", border: "#C4DEC0", accent: "#59A14F", text: "#3A6B34" },   // 2 Green
+  { bg: "#FDEEED", border: "#F5C0C0", accent: "#E15759", text: "#B02E30" },   // 3 Red
+  { bg: "#F5EEF3", border: "#E0C5D9", accent: "#B07AA1", text: "#7D4F71" },   // 4 Purple
+  { bg: "#F2EEEB", border: "#DDD0C7", accent: "#9C755F", text: "#6D4D3A" },   // 5 Brown
+  { bg: "#FFF0F1", border: "#FFC8CC", accent: "#FF9DA7", text: "#CC5060" },   // 6 Pink
+  { bg: "#F5F4F3", border: "#E4E2E0", accent: "#BAB0AC", text: "#777470" },   // 7 Gray
+  { bg: "#EDF3F3", border: "#C1DFDD", accent: "#76B7B2", text: "#457C78" },   // 8 Teal
+  { bg: "#FEF9E8", border: "#F8E8A9", accent: "#EDC948", text: "#A08010" },   // 9 Gold
 ];
+
+const NOISE_PALETTE = { bg: "#F5F5F5", border: "#E0E0E0", accent: "#D3D3D3", text: "#888888" };
+
+/** Get palette for a cluster ID (handles -1 noise, wraps at 10) */
+function getClusterPalette(clusterId: number) {
+  if (clusterId === -1) return NOISE_PALETTE;
+  return PALETTES[((clusterId % 10) + 10) % 10];
+}
+
+/** Get accent color for a cluster ID (used in charts) */
+function getClusterColor(clusterId: number): string {
+  return getClusterPalette(clusterId).accent;
+}
 
 const STROKE_COLORS = PALETTES.map((p) => p.accent);
 
@@ -227,7 +276,7 @@ async function exportSegmentsToPptx(segments: SegmentProfile[]) {
 
     for (const seg of segments) {
       const slide = prs.addSlide();
-      const pal = PALETTES[seg.id % PALETTES.length];
+      const pal = getClusterPalette(seg.id);
       slide.addText(`Segment: ${seg.name}`, { x: 0.5, y: 0.3, w: 11, fontSize: 22, bold: true, color: pal.accent.replace("#", "") });
       slide.addText(`${seg.pct.toFixed(1)}% of total (n=${seg.size.toLocaleString()})`, { x: 0.5, y: 0.9, w: 11, fontSize: 14, color: "666666" });
       if (seg.description) {
@@ -890,14 +939,19 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     return idx >= 0 ? idx : headers.indexOf(name.replace(/_/g, ""));
   };
 
-  const ciClusterId     = col("CLUSTER_ID");
-  const ciClusterLabel  = col("CLUSTER_LABEL");
-  const ciPc1           = col("PC1");
-  const ciPc2           = col("PC2");
-  const ciModelMeta     = col("MODEL_METADATA");
-  const ciRecordId      = col("RECORD_ID");
-  const ciProbability   = col("CLUSTER_PROBABILITY");
-  const ciEntropy       = col("CLUSTER_ENTROPY");
+  const ciClusterId           = col("CLUSTER_ID");
+  const ciClusterLabel        = col("CLUSTER_LABEL");
+  const ciPc1                 = col("PC1");
+  const ciPc2                 = col("PC2");
+  const ciModelMeta           = col("MODEL_METADATA");
+  const ciRecordId            = col("RECORD_ID");
+  const ciProbability         = col("CLUSTER_PROBABILITY");
+  const ciEntropy             = col("CLUSTER_ENTROPY");
+  const ciRunId               = col("RUN_ID");
+  const ciRunTimestamp        = col("RUN_TIMESTAMP");
+  const ciUserName            = col("USER_NAME");
+  const ciNSegmentsRequested  = col("N_SEGMENTS_REQUESTED");
+  const ciNSegmentsUsed       = col("N_SEGMENTS_USED");
 
   const rows = results.rows;
 
@@ -918,18 +972,60 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     n_features_input?: number;
     n_features_active?: number;
     feature_names?: string[];
-    dropped_features?: string[];
-    dropped_protected?: string[];
-    re_encoded_binary?: string[];
-    flagged_sparse?: string[];
-    user_protected_features?: string[];
     global_silhouette_avg?: number;
     model_confidence_label?: string;
-    inertia?: number;
-    medoid_record_ids?: string[];
     cluster_profiles?: Record<string, ClusterProfile>;
     cluster_sizes?: Record<string, number>;
-    feature_weighting?: Record<string, unknown>;
+
+    /** Data quality checks — all dropped / re-encoded / protected features */
+    data_quality?: {
+      dropped_features?: string[];
+      dropped_protected?: string[];
+      re_encoded_binary?: string[];
+      flagged_sparse?: string[];
+      user_protected_features?: string[];
+    };
+
+    /** Algorithm-specific parameters — shape varies by algorithm */
+    algorithm_params?: {
+      // K-Means / K-Medoids
+      inertia?: number;
+      // K-Medoids only
+      medoid_record_ids?: string[];
+      // Hierarchical
+      linkage_method?: string;
+      // DBSCAN
+      eps?: number;
+      min_samples?: number;
+      noise_count?: number;
+      // GMM
+      converged?: boolean;
+      n_iterations?: number;
+      aic?: number;
+      bic?: number;
+      covariance_type?: string;
+      auto_k_method?: string;
+      cluster_weights?: Record<string, number>;
+      // GMM auto-K (Dirichlet Process)
+      dp_converged?: boolean;
+      dp_n_iterations?: number;
+      dp_raw_weights?: Record<string, number>;
+      dp_components_tested?: number;
+      dp_components_active?: number;
+      dp_weight_concentration_prior?: number;
+    };
+
+    /** Feature weighting pipeline details */
+    feature_weighting?: {
+      method?: "entropy_only" | "entropy_rf_pipeline" | "entropy_only_fallback" | "entropy_only_rf_fallback";
+      entropy_weights?: Record<string, number>;
+      final_weights?: Record<string, number>;
+      draft_kmedoids_k?: number | null;
+      draft_kmedoids_silhouette?: number | null;
+      rf_oob_score?: number | null;
+      pipeline_threshold?: number;
+    };
+
     pca?: {
       n_components?: number;
       explained_variance_ratio?: number[];
@@ -952,11 +1048,13 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
   const algorithm            = modelMeta.algorithm?.toUpperCase().replace(/[- ]/g, "_");
   const nClusters            = modelMeta.n_clusters;
   const featureNames         = modelMeta.feature_names ?? [];
-  const droppedFeatures      = modelMeta.dropped_features ?? [];
-  const droppedProtected     = modelMeta.dropped_protected ?? [];
-  const reEncodedBinary      = modelMeta.re_encoded_binary ?? [];
-  const flaggedSparse        = modelMeta.flagged_sparse ?? [];
-  const userProtectedFeatures = modelMeta.user_protected_features ?? [];
+  // data_quality sub-object (new schema) — all nested under metadata.data_quality.*
+  const dq                   = modelMeta.data_quality;
+  const droppedFeatures      = dq?.dropped_features      ?? [];
+  const droppedProtected     = dq?.dropped_protected     ?? [];
+  const reEncodedBinary      = dq?.re_encoded_binary     ?? [];
+  const flaggedSparse        = dq?.flagged_sparse        ?? [];
+  const userProtectedFeatures = dq?.user_protected_features ?? [];
   const silhouette       = modelMeta.global_silhouette_avg;
   const confidenceLabel  = modelMeta.model_confidence_label;
   // n_records from MODEL_METADATA is the authoritative record count
@@ -1071,6 +1169,18 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
         const pt: PcaPoint = { pc1, pc2, cluster };
         // Record ID for tooltip
         if (ciRecordId >= 0) pt.recordId = row[ciRecordId] as string | number;
+        // Soft membership probability (0–1)
+        if (ciProbability >= 0) {
+          const prob = Number(row[ciProbability]);
+          if (!isNaN(prob)) pt.probability = prob;
+        }
+        // Assignment entropy (0 = certain, 1 = max uncertain)
+        if (ciEntropy >= 0) {
+          const ent = Number(row[ciEntropy]);
+          if (!isNaN(ent)) pt.entropy = ent;
+        }
+        // DBSCAN noise flag
+        if (cluster === -1) pt.isNoise = true;
         // Per-member FEATURE_ZSCORES — keys have _Z_SCORE suffix, strip it
         if (ciFeatureZScores >= 0) {
           const raw = row[ciFeatureZScores];
@@ -1124,6 +1234,38 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     return rec;
   });
 
+  // Pass through algorithm_params for algorithm-specific display
+  const ap = modelMeta.algorithm_params;
+  const fw = modelMeta.feature_weighting;
+
+  // ── Extract run-level metadata from first row
+  const runId        = ciRunId        >= 0 ? String(rows[0]?.[ciRunId]        ?? "") || undefined : undefined;
+  const runTimestamp = ciRunTimestamp >= 0 ? String(rows[0]?.[ciRunTimestamp] ?? "") || undefined : undefined;
+  const userName     = ciUserName     >= 0 ? String(rows[0]?.[ciUserName]     ?? "") || undefined : undefined;
+  // N_SEGMENTS_REQUESTED/USED from table columns (fallback to MODEL_METADATA fields)
+  const nSegmentsRequested = ciNSegmentsRequested >= 0
+    ? (Number(rows[0]?.[ciNSegmentsRequested]) || undefined)
+    : (modelMeta as Record<string, unknown>)["n_segments_requested"] != null
+      ? Number((modelMeta as Record<string, unknown>)["n_segments_requested"])
+      : undefined;
+  const nSegmentsUsed = ciNSegmentsUsed >= 0
+    ? (Number(rows[0]?.[ciNSegmentsUsed]) || undefined)
+    : (modelMeta as Record<string, unknown>)["n_segments_used"] != null
+      ? Number((modelMeta as Record<string, unknown>)["n_segments_used"])
+      : undefined;
+
+  // ── Extract medoid PCA positions from cluster_profiles._MEDOID_PC1/_MEDOID_PC2
+  const medoidPoints: Array<{ cluster: number; pc1: number; pc2: number }> = [];
+  for (const [clusterIdStr, profile] of Object.entries(clusterProfiles)) {
+    const medoidPc1 = (profile as Record<string, unknown>)["_MEDOID_PC1"];
+    const medoidPc2 = (profile as Record<string, unknown>)["_MEDOID_PC2"];
+    if (typeof medoidPc1 === "number" && typeof medoidPc2 === "number") {
+      medoidPoints.push({ cluster: parseInt(clusterIdStr), pc1: medoidPc1, pc2: medoidPc2 });
+    }
+  }
+
+  const cumulativeVariance = modelMeta.pca?.cumulative_variance ?? undefined;
+
   return {
     algorithm,
     totalRecords,
@@ -1140,6 +1282,16 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     clusterCountMethod: "auto",
     silhouetteScore: silhouette,
     confidenceLabel,
+    // algorithm_params — pass through as opaque bag for future display
+    algorithmParams: ap ? (ap as Record<string, unknown>) : undefined,
+    // feature_weighting — pass through key fields
+    featureWeighting: fw ? {
+      method:          fw.method,
+      finalWeights:    fw.final_weights ?? undefined,
+      entropyWeights:  fw.entropy_weights ?? undefined,
+      rfOobScore:      fw.rf_oob_score  ?? null,
+      draftSilhouette: fw.draft_kmedoids_silhouette ?? null,
+    } : undefined,
     segments,
     pcaPoints: pcaPoints.length > 0 ? pcaPoints : undefined,
     pc1Label: "PC1",
@@ -1149,6 +1301,18 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     pc1TopFeatures: pc1TopFeaturesFromServer.length > 0 ? pc1TopFeaturesFromServer : undefined,
     pc2TopFeatures: pc2TopFeaturesFromServer.length > 0 ? pc2TopFeaturesFromServer : undefined,
     membershipTable: membershipTable.length > 0 ? membershipTable : undefined,
+    cumulativeVariance,
+    runId,
+    runTimestamp,
+    userName,
+    nSegmentsRequested,
+    nSegmentsUsed,
+    medoidPoints: medoidPoints.length > 0 ? medoidPoints : undefined,
+    caveats: cumulativeVariance != null && cumulativeVariance < 0.5
+      ? [`The two principal components capture only ${(cumulativeVariance * 100).toFixed(0)}% of variance. The scatter plot provides a limited 2D view — clusters that appear close may be well-separated in higher dimensions.`]
+      : cumulativeVariance != null && cumulativeVariance < 0.7
+      ? [`The two principal components capture ~${(cumulativeVariance * 100).toFixed(0)}% of variance. The scatter plot provides a reasonable view, though some cluster separation exists in higher dimensions.`]
+      : undefined,
   };
 }
 
@@ -1157,6 +1321,7 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
 // ---------------------------------------------------------------------------
 
 function ModelPerformanceCard({ data }: { data: SegmentationData }) {
+  const [runIdCopied, setRunIdCopied] = useState(false);
   const silhouette = data.silhouetteScore;
 
   // ── Confidence label: prefer server-provided model_confidence_label,
@@ -1193,9 +1358,60 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
         : "no closer to their own cluster than to neighbouring clusters. Use results directionally — segments may not be stable.")
     : null;
 
+  // Cluster count label — show "{used} (requested {requested})" when they differ
+  const clusterCountLabel = (() => {
+    const used = data.nSegmentsUsed ?? data.clusterCount;
+    const requested = data.nSegmentsRequested;
+    if (used == null) return null;
+    if (requested != null && requested !== used) return `${used} (requested ${requested})`;
+    return String(used);
+  })();
+
+  // Weight method display
+  const weightMethodLabel = (() => {
+    const m = data.featureWeighting?.method;
+    if (!m) return null;
+    const labels: Record<string, string> = {
+      entropy_only:          "Entropy",
+      entropy_rf_pipeline:   "Entropy + RF",
+      entropy_only_fallback: "Entropy (fallback)",
+      entropy_only_rf_fallback: "RF Fallback",
+    };
+    return labels[m] ?? m.replace(/_/g, " ");
+  })();
+
+  // PCA variance captured
+  const pcaVariancePct = data.cumulativeVariance != null
+    ? `${(data.cumulativeVariance * 100).toFixed(0)}%`
+    : (data.pc1Variance != null && data.pc2Variance != null)
+      ? `${(data.pc1Variance + data.pc2Variance).toFixed(0)}%`
+      : null;
+
+  const handleCopyRunId = () => {
+    if (!data.runId) return;
+    navigator.clipboard.writeText(data.runId).then(() => {
+      setRunIdCopied(true);
+      setTimeout(() => setRunIdCopied(false), 2000);
+    });
+  };
+
   return (
     <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
-      <SectionTitle icon={<BarChart2 size={15} />} title="Model Performance" />
+      <div className="flex items-start justify-between mb-4 flex-wrap gap-2">
+        <SectionTitle icon={<BarChart2 size={15} />} title="Model Performance" />
+        {/* Run ID click-to-copy badge */}
+        {data.runId && (
+          <button
+            onClick={handleCopyRunId}
+            title={`Run ID: ${data.runId} — click to copy`}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono transition-colors hover:opacity-80"
+            style={{ background: "var(--bg-primary, #f1f5f9)", border: "1px solid var(--border)", color: "var(--text-muted)", maxWidth: 220 }}
+          >
+            {runIdCopied ? <Check size={10} className="text-green-600" /> : <Copy size={10} />}
+            <span className="truncate">{runIdCopied ? "Copied!" : `Run: ${data.runId.slice(0, 20)}${data.runId.length > 20 ? "…" : ""}`}</span>
+          </button>
+        )}
+      </div>
 
       {/* ── Row 1: Metric pills ────────────────────────────────────────────── */}
       <div className="flex flex-wrap gap-3 mb-4">
@@ -1206,8 +1422,9 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
             value={data.algorithm.replace(/_/g, "-").replace(/^CLUSTER-/i, "")}
           />
         )}
-        {data.clusterCount != null && (
-          <MetricPill label="Segments" value={data.clusterCount} />
+        {/* Segments — show mismatch when requested ≠ used */}
+        {clusterCountLabel != null && (
+          <MetricPill label="Segments" value={clusterCountLabel} />
         )}
         {/* n_records from model_metadata */}
         {data.totalRecords != null && data.totalRecords > 0 && (
@@ -1218,10 +1435,15 @@ function ModelPerformanceCard({ data }: { data: SegmentationData }) {
           const input  = data.nFeaturesInput;
           const active = data.nFeaturesActive;
           if (input != null && active != null && input !== active) {
-            return <MetricPill label="Features" value={`${active} active of ${input} input`} />;
+            return <MetricPill label="Features" value={`${active} active / ${input} input`} />;
           }
           return <MetricPill label="Features" value={active ?? input ?? 0} />;
         })()}
+        {/* PCA variance is shown in the scatter plot axis labels — no pill here */}
+        {/* Feature weighting method */}
+        {weightMethodLabel && (
+          <MetricPill label="Weight Method" value={weightMethodLabel} />
+        )}
       </div>
 
       {/* ── Row 2: Silhouette score bar + confidence interpretation ──────── */}
@@ -1305,6 +1527,10 @@ interface ModelFeaturesCardProps {
   reEncodedBinary?: string[];
   flaggedSparse?: string[];
   userProtectedFeatures?: string[];
+  /** final_weights from feature_weighting — used to render equalizer bars */
+  finalWeights?: Record<string, number>;
+  /** entropy_weights — fallback equalizer source when finalWeights is absent */
+  entropyWeights?: Record<string, number>;
   onDownload: () => void;
 }
 
@@ -1352,14 +1578,42 @@ function ModelFeaturesCard({
   reEncodedBinary = [],
   flaggedSparse = [],
   userProtectedFeatures = [],
+  finalWeights,
+  entropyWeights,
   onDownload,
 }: ModelFeaturesCardProps) {
+  const [collapsed, setCollapsed] = useState(true);
   const sorted = [...featuresUsed].sort((a, b) => a.localeCompare(b));
 
+  // Use finalWeights; fall back to entropyWeights when unavailable
+  const weights = finalWeights ?? entropyWeights;
+  const weightsLabel = finalWeights ? "influence weight" : entropyWeights ? "entropy weight" : null;
+
+  // Sort features by weight descending; unweighted features go to the end alphabetically
+  const sortedByWeight = weights
+    ? [...featuresUsed].sort((a, b) => {
+        const wa = weights[a] ?? -1;
+        const wb = weights[b] ?? -1;
+        return wb - wa;
+      })
+    : [...featuresUsed].sort((a, b) => a.localeCompare(b));
+
+  // Build normalised weights for equalizer bars (0–100 scale)
+  const maxWeight = weights ? Math.max(...Object.values(weights), 1) : 0;
+
   return (
-    <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
-      {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-5">
+    <div className="rounded-2xl" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+      {/* ── Collapsible Header ────────────────────────────────────────────── */}
+      {/* Using a div instead of button so that the DownloadButton <button> inside
+          is valid HTML (buttons cannot be nested). Role + keyboard handler preserve
+          full accessibility. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setCollapsed((v) => !v)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setCollapsed((v) => !v); } }}
+        className="w-full flex items-center justify-between px-5 py-3.5 rounded-2xl hover:bg-black/4 transition-colors cursor-pointer select-none"
+      >
         <div className="flex items-center gap-2 flex-wrap">
           <Table2 size={15} style={{ color: "var(--text-muted)" }} />
           <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
@@ -1375,63 +1629,126 @@ function ModelFeaturesCard({
             </span>
           )}
         </div>
-        <DownloadButton label="CSV" onClick={onDownload} />
+        <div className="flex items-center gap-2">
+          <div onClick={(e) => e.stopPropagation()}>
+            <DownloadButton label="CSV" onClick={onDownload} />
+          </div>
+          {collapsed
+            ? <ChevronDown size={14} style={{ color: "var(--text-muted)" }} />
+            : <ChevronUp   size={14} style={{ color: "var(--text-muted)" }} />}
+        </div>
       </div>
 
-      {/* Divider between sections */}
-      <div className="flex flex-col gap-4" style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+      {!collapsed && (
+        <div className="flex flex-col gap-4 px-5 pb-5" style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
 
-        {/* ── 1. Active features (feature_names) ─────────────────────────── */}
-        <FeatureSection
-          label="Used in clustering"
-          sublabel="These variables were included in the final segmentation model."
-          features={sorted}
-          tagStyle={{ background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe", fontWeight: 500 }}
-        />
+          {/* ── 1. Active features — with optional equalizer bars ──────────── */}
+          {sortedByWeight.length > 0 && (
+            <div className="mb-4 last:mb-0">
+              <p className="text-[10px] font-bold uppercase tracking-wide mb-2" style={{ color: "var(--text-muted)", letterSpacing: "0.06em" }}>
+                Used in clustering
+                <span className="ml-2 font-normal normal-case tracking-normal" style={{ opacity: 0.7 }}>({sortedByWeight.length})</span>
+              </p>
+              <p className="text-[10px] mb-3" style={{ color: "var(--text-muted)", opacity: 0.75 }}>
+                These variables were included in the final segmentation model.
+                {weights && ` Bar length indicates relative ${weightsLabel} assigned before clustering.`}
+              </p>
+              {/* Equalizer layout when weights available; horizontal pills otherwise */}
+              {weights ? (
+                <div style={{ display: "grid", gridTemplateColumns: "160px 1fr 44px", rowGap: 6, alignItems: "center", columnGap: 10 }}>
+                  {sortedByWeight.map((f) => {
+                    const w = weights[f];
+                    const pct = w != null && maxWeight > 0 ? (w / maxWeight) * 100 : 0;
+                    // Muted green / orange / maroon colour tiers
+                    const tier = w == null ? "low" : pct >= 66 ? "high" : pct >= 33 ? "mid" : "low";
+                    const barColor  = tier === "high" ? "#3d9e68" : tier === "mid" ? "#c98a30" : "#9e4545";
+                    const tagBg     = tier === "high" ? "#e8f7ef" : tier === "mid" ? "#fdf0e0" : "#f7e8e8";
+                    const tagColor  = tier === "high" ? "#1f6640" : tier === "mid" ? "#7a4a10" : "#6e2222";
+                    const tagBorder = tier === "high" ? "#a0d4b8" : tier === "mid" ? "#e8c080" : "#d49898";
+                    return (
+                      <React.Fragment key={f}>
+                        {/* col 1 — label, fixed width so every bar starts at the same x */}
+                        <span
+                          className="text-xs px-2.5 py-1 rounded-lg truncate"
+                          style={{ background: tagBg, color: tagColor, border: `1px solid ${tagBorder}`, fontWeight: 500 }}
+                          title={f}
+                        >
+                          {f}
+                        </span>
+                        {/* col 2 — bar track, all identical width */}
+                        <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-primary, #f0f0f0)" }}>
+                          <div
+                            className="h-full rounded-full transition-all duration-300"
+                            style={{ width: `${pct}%`, background: barColor }}
+                          />
+                        </div>
+                        {/* col 3 — value, fixed width so bars all end at the same x */}
+                        <span className="text-[10px] tabular-nums text-right" style={{ color: "var(--text-muted)" }}>
+                          {w != null ? w.toFixed(3) : "—"}
+                        </span>
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {sorted.map((f, i) => (
+                    <span
+                      key={i}
+                      className="text-xs px-2.5 py-1 rounded-lg"
+                      style={{ background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe", fontWeight: 500 }}
+                    >
+                      {f}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
-        {/* ── 2. User-specified protected features (user_protected_features) */}
-        <FeatureSection
-          label="User-specified (protected)"
-          sublabel="Explicitly requested by the user to be included in the model."
-          features={userProtectedFeatures}
-          tagStyle={{ background: "#f0fdf4", color: "#15803d", border: "1px solid #bbf7d0", fontWeight: 500 }}
-        />
+          {/* ── 2. User-specified protected features ──────────────────────── */}
+          <FeatureSection
+            label="User-specified (protected)"
+            sublabel="Explicitly requested by the user to be included in the model."
+            features={userProtectedFeatures}
+            tagStyle={{ background: "#f0fdf4", color: "#15803d", border: "1px solid #bbf7d0", fontWeight: 500 }}
+          />
 
-        {/* ── 3. Re-encoded binary (re_encoded_binary) ─────────────────────── */}
-        <FeatureSection
-          label="Re-encoded for sparsity"
-          sublabel="Binary features that were transformed to reduce the effect of sparse or skewed distributions."
-          features={reEncodedBinary}
-          tagStyle={{ background: "#f5f3ff", color: "#5b21b6", border: "1px solid #ddd6fe", fontWeight: 500 }}
-        />
+          {/* ── 3. Re-encoded binary ──────────────────────────────────────── */}
+          <FeatureSection
+            label="Re-encoded for sparsity"
+            sublabel="Binary features transformed to reduce sparse or skewed distributions."
+            features={reEncodedBinary}
+            tagStyle={{ background: "#f5f3ff", color: "#5b21b6", border: "1px solid #ddd6fe", fontWeight: 500 }}
+          />
 
-        {/* ── 4. Flagged sparse but NOT re-encoded (flagged_sparse) ─────────── */}
-        <FeatureSection
-          label="Flagged sparse — kept as-is"
-          sublabel="These variables were identified as sparse but were retained in their original form without re-encoding."
-          features={flaggedSparse}
-          tagStyle={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", fontWeight: 500 }}
-        />
+          {/* ── 4. Flagged sparse but kept ────────────────────────────────── */}
+          <FeatureSection
+            label="Flagged sparse — kept as-is"
+            sublabel="Identified as sparse but retained in their original form without re-encoding."
+            features={flaggedSparse}
+            tagStyle={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", fontWeight: 500 }}
+          />
 
-        {/* ── 5. Dropped low variance (dropped_features) ───────────────────── */}
-        <FeatureSection
-          label="Dropped — low variance"
-          sublabel="Near-zero variance across the population. Excluded to prevent noise from dominating the model."
-          features={droppedFeatures}
-          tagStyle={{ background: "#fefce8", color: "#92400e", border: "1px solid #fde68a" }}
-          strikethrough
-        />
+          {/* ── 5. Dropped low variance ───────────────────────────────────── */}
+          <FeatureSection
+            label="Dropped — low variance"
+            sublabel="Near-zero variance across the population. Excluded to prevent noise from dominating the model."
+            features={droppedFeatures}
+            tagStyle={{ background: "#fefce8", color: "#92400e", border: "1px solid #fde68a" }}
+            strikethrough
+          />
 
-        {/* ── 6. Dropped protected features (dropped_protected) ────────────── */}
-        <FeatureSection
-          label="Dropped — user-specified, low variance"
-          sublabel="Specified by the user as important but still showed near-zero variance and were excluded."
-          features={droppedProtected}
-          tagStyle={{ background: "#fff1f2", color: "#9f1239", border: "1px solid #fecdd3" }}
-          strikethrough
-        />
-
-      </div>
+          {/* ── 6. Dropped protected features ────────────────────────────── */}
+          <FeatureSection
+            label="Dropped — user-specified, low variance"
+            sublabel="User-requested but excluded due to near-zero variance."
+            features={droppedProtected}
+            tagStyle={{ background: "#fff1f2", color: "#9f1239", border: "1px solid #fecdd3" }}
+            strikethrough
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -1618,8 +1935,53 @@ async function exportSnakePlotToPptx(segments: SegmentProfile[]) {
 // Segment Profiles Grid
 // ---------------------------------------------------------------------------
 
+/** Convert a raw column name to a readable label: AVG_DAYS_SUPPLY → Avg Days Supply */
+function humanizeFeature(col: string): string {
+  return col
+    .replace(/_/g, ' ')
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Build a concise, human-readable characterisation of the segment from its z-scores.
+ * E.g. "Very high Total Claims (+2.9σ), below-average Avg Days Supply (−0.8σ)"
+ */
+function buildSegmentSummary(seg: SegmentProfile): string | null {
+  const entries = Object.entries(seg.zScores ?? {})
+    .filter(([, z]) => isFinite(z) && Math.abs(z) >= 0.3)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, 3);
+
+  if (entries.length === 0) return null;
+
+  const parts = entries.map(([feat, z]) => {
+    const label = humanizeFeature(feat);
+    const level =
+      z >= 2    ? 'very high' :
+      z >= 0.75 ? 'high'      :
+      z >= 0.3  ? 'above-avg' :
+      z <= -2   ? 'very low'  :
+      z <= -0.75 ? 'low'      : 'below-avg';
+    const sign = z > 0 ? '+' : '−';
+    return `${level} ${label} (${sign}${Math.abs(z).toFixed(1)}σ)`;
+  });
+
+  return parts.join(' · ');
+}
+
+/** Parse "COLUMN_NAME (Z=±0.77)" → "Column Name (±0.77σ)" */
+function formatTopDriver(raw: string): string {
+  const m = raw.match(/^([A-Z0-9_]+)\s*\(Z=([+-]?[\d.]+)\)$/i);
+  if (!m) return raw;
+  const label = humanizeFeature(m[1]);
+  const z = parseFloat(m[2]);
+  const sign = z >= 0 ? '+' : '−';
+  return `${label} (${sign}${Math.abs(z).toFixed(2)}σ)`;
+}
+
 function SegmentProfileCard({ seg, index }: { seg: SegmentProfile; index: number }) {
-  const pal = PALETTES[index % PALETTES.length];
+  const pal = getClusterPalette(seg.id);
 
   return (
     <div
@@ -1666,16 +2028,20 @@ function SegmentProfileCard({ seg, index }: { seg: SegmentProfile; index: number
         </div>
       )}
 
-      {/* Description */}
-      {seg.description && (
-        <p className="text-xs leading-relaxed" style={{ color: "#555" }}>{seg.description}</p>
-      )}
+      {/* Segment summary — generated from z-scores for clarity */}
+      {(() => {
+        const summary = buildSegmentSummary(seg);
+        if (!summary) return null;
+        return (
+          <p className="text-xs leading-relaxed" style={{ color: "#555" }}>{summary}</p>
+        );
+      })()}
 
-      {/* Top driver */}
+      {/* Top driver — humanized */}
       {seg.topDriver && (
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium" style={{ color: pal.accent }}>Top Driver:</span>
-          <span className="text-xs" style={{ color: "#444" }}>{seg.topDriver}</span>
+          <span className="text-xs" style={{ color: "#444" }}>{formatTopDriver(seg.topDriver)}</span>
         </div>
       )}
 
@@ -1732,19 +2098,22 @@ interface PcaScatterProps {
   pc1TopFeatures?: string[];
   pc2TopFeatures?: string[];
   segmentNames: Record<number, string>;
+  medoidPoints?: Array<{ cluster: number; pc1: number; pc2: number }>;
   height?: number;
 }
 
-function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures, segmentNames, height = 340 }: PcaScatterProps) {
+function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures, segmentNames, medoidPoints, height = 340 }: PcaScatterProps) {
+  // Separate noise points from cluster points
+  const noisePoints = points.filter((p) => p.isNoise || p.cluster === -1);
+  const clusterPoints = points.filter((p) => !p.isNoise && p.cluster !== -1);
+
   const grouped: Record<number, (PcaPoint & { name: string })[]> = {};
-  for (const p of points) {
+  for (const p of clusterPoints) {
     if (!grouped[p.cluster]) grouped[p.cluster] = [];
     grouped[p.cluster].push({ ...p, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}` });
   }
 
   // Bubble mode: every cluster collapses to a single distinct (pc1, pc2) position.
-  // This happens when data comes from narrative-parsed centroids or when each cluster
-  // has multiple members that share identical coordinates.
   const isBubbleMode = Object.values(grouped).every((pts) => {
     if (pts.length <= 1) return true;
     const { pc1: refX, pc2: refY } = pts[0];
@@ -1777,6 +2146,20 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
       ? `${pc2Label ?? "PC2"} (${pc2Variance.toFixed(1)}% var.)`
       : (pc2Label ?? "PC2");
 
+  // Point opacity from entropy (0=certain/opaque, 1=uncertain/transparent)
+  const pointOpacity = (pt: PcaPoint, baseOpacity: number) => {
+    if (pt.entropy == null) return baseOpacity;
+    // Remap: entropy 0 → base (opaque), entropy 1 → 0.25 (transparent)
+    return baseOpacity - (pt.entropy * (baseOpacity - 0.25));
+  };
+
+  // Individual point size from probability (0–1) in scatter mode
+  const pointSize = (pt: PcaPoint) => {
+    if (pt.probability == null) return 20;
+    // Remap probability 0.5–1.0 → 10–35 px² (r ~3–6px)
+    return 10 + (pt.probability - 0.5) * 2 * 50;
+  };
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       {/* Extra bottom margin so legend doesn't collide with X-axis label */}
@@ -1798,8 +2181,6 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
           width={55}
           label={(props: { viewBox?: { x: number; y: number; width: number; height: number } }) => {
             const vb = props.viewBox ?? { x: 0, y: 0, width: 55, height: 340 };
-            // Place the label to the LEFT of the tick numbers:
-            // vb.x is the left edge of the plot area; subtract enough to clear the tick numbers (~40px wide)
             const cx = vb.x - 38;
             const cy = vb.y + vb.height / 2;
             return (
@@ -1825,7 +2206,7 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
             const isIndividualMember = d.recordId != null;
             return (
               <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", maxWidth: 220 }}>
-                <p className="font-semibold mb-0.5">{d.name}</p>
+                <p className="font-semibold mb-0.5">{d.isNoise ? "Noise / Outlier" : d.name}</p>
                 {isIndividualMember && (
                   <p className="mb-0.5" style={{ color: "var(--text-muted)" }}>
                     Record ID: <span className="font-medium">{String(d.recordId)}</span>
@@ -1833,6 +2214,12 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
                 )}
                 {d.pct != null && d.pct > 0 && (
                   <p style={{ color: "var(--text-muted)" }}>{d.pct.toFixed(1)}% of population</p>
+                )}
+                {d.probability != null && (
+                  <p style={{ color: "var(--text-muted)" }}>Probability: <span className="font-medium">{d.probability.toFixed(3)}</span></p>
+                )}
+                {d.entropy != null && (
+                  <p style={{ color: "var(--text-muted)" }}>Entropy: <span className="font-medium">{d.entropy.toFixed(3)}</span></p>
                 )}
                 <p style={{ color: "var(--text-muted)" }}>PC1: {d.pc1.toFixed(4)}</p>
                 <p style={{ color: "var(--text-muted)" }}>PC2: {d.pc2.toFixed(4)}</p>
@@ -1854,63 +2241,320 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
         <Legend
           verticalAlign="top"
           wrapperStyle={{ paddingBottom: 12, fontSize: 11 }}
-          formatter={(value) => segmentNames[Number(value)] ?? value}
+          formatter={(value) => {
+            if (value === "__noise__") return "Noise / Outlier";
+            return segmentNames[Number(value)] ?? value;
+          }}
         />
-        {Object.entries(grouped).map(([cluster, pts]) => (
+
+        {/* DBSCAN noise points — gray, low opacity */}
+        {noisePoints.length > 0 && (
           <Scatter
-            key={cluster}
-            name={cluster}
-            data={pts}
-            fill={STROKE_COLORS[Number(cluster) % STROKE_COLORS.length]}
-            opacity={isBubbleMode ? 0.85 : 0.65}
-            // Bubble mode: halo ring + solid core sized by segment pct, with label
-            shape={isBubbleMode ? (props: ScatterShapeProps) => {
+            key="__noise__"
+            name="__noise__"
+            data={noisePoints.map((p) => ({ ...p, name: "Noise / Outlier" }))}
+            fill="#D3D3D3"
+            opacity={0.4}
+            shape={isBubbleMode ? undefined : (props: ScatterShapeProps) => {
               const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
               const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
-              const fill = STROKE_COLORS[Number(cluster) % STROKE_COLORS.length];
-              const label = segmentNames[Number(cluster)] ?? `Cluster ${cluster}`;
-              const shortLabel = label.length > 16 ? label.slice(0, 14) + "…" : label;
-              const pctVal = (props as unknown as Record<string, number | undefined>)["pct"];
-              const r = bubbleRadius(pctVal);
-              return (
-                <g>
-                  {/* outer halo — semi-transparent, area ∝ cluster size */}
-                  <circle cx={cx} cy={cy} r={r * 1.6} fill={fill} opacity={0.12} />
-                  {/* mid ring */}
-                  <circle cx={cx} cy={cy} r={r * 1.1} fill="none" stroke={fill} strokeWidth={1} opacity={0.3} />
-                  {/* solid core */}
-                  <circle cx={cx} cy={cy} r={r * 0.55} fill={fill} opacity={0.9} />
-                  {/* segment label above bubble */}
-                  <text
-                    x={cx}
-                    y={cy - r * 1.7}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fontWeight={600}
-                    fill={fill}
-                    style={{ pointerEvents: "none" }}
-                  >
-                    {shortLabel}
-                  </text>
-                  {/* pct label inside core */}
-                  {pctVal != null && pctVal > 0 && (
-                    <text
-                      x={cx}
-                      y={cy + 4}
-                      textAnchor="middle"
-                      fontSize={8}
-                      fontWeight={700}
-                      fill="#fff"
-                      style={{ pointerEvents: "none" }}
-                    >
-                      {pctVal.toFixed(0)}%
-                    </text>
-                  )}
-                </g>
-              );
-            } : undefined}
+              const pt = (props as unknown as Record<string, unknown>)["payload"] as PcaPoint | undefined;
+              const op = pointOpacity(pt ?? {} as PcaPoint, 0.35);
+              const sz = Math.sqrt(Math.max(pointSize(pt ?? {} as PcaPoint), 5));
+              return <circle cx={cx} cy={cy} r={sz} fill="#D3D3D3" opacity={op} />;
+            }}
           />
-        ))}
+        )}
+
+        {/* Cluster scatter series */}
+        {Object.entries(grouped).map(([cluster, pts]) => {
+          const clusterId = Number(cluster);
+          const fill = getClusterColor(clusterId);
+          return (
+            <Scatter
+              key={cluster}
+              name={cluster}
+              data={pts}
+              fill={fill}
+              opacity={isBubbleMode ? 0.85 : 0.65}
+              // Bubble mode: halo ring + solid core sized by segment pct, with label
+              shape={isBubbleMode ? (props: ScatterShapeProps) => {
+                const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
+                const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
+                const label = segmentNames[clusterId] ?? `Cluster ${cluster}`;
+                const shortLabel = label.length > 16 ? label.slice(0, 14) + "…" : label;
+                const pctVal = (props as unknown as Record<string, number | undefined>)["pct"];
+                const r = bubbleRadius(pctVal);
+                return (
+                  <g>
+                    {/* outer halo */}
+                    <circle cx={cx} cy={cy} r={r * 1.6} fill={fill} opacity={0.12} />
+                    {/* mid ring */}
+                    <circle cx={cx} cy={cy} r={r * 1.1} fill="none" stroke={fill} strokeWidth={1} opacity={0.3} />
+                    {/* solid core */}
+                    <circle cx={cx} cy={cy} r={r * 0.55} fill={fill} opacity={0.9} />
+                    {/* segment label above bubble */}
+                    <text x={cx} y={cy - r * 1.7} textAnchor="middle" fontSize={9} fontWeight={600} fill={fill} style={{ pointerEvents: "none" }}>
+                      {shortLabel}
+                    </text>
+                    {pctVal != null && pctVal > 0 && (
+                      <text x={cx} y={cy + 4} textAnchor="middle" fontSize={8} fontWeight={700} fill="#fff" style={{ pointerEvents: "none" }}>
+                        {pctVal.toFixed(0)}%
+                      </text>
+                    )}
+                  </g>
+                );
+              } : (props: ScatterShapeProps) => {
+                // Individual point mode — size from probability, opacity from entropy
+                const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
+                const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
+                const pt = (props as unknown as Record<string, unknown>)["payload"] as PcaPoint | undefined;
+                const op = pointOpacity(pt ?? {} as PcaPoint, 0.65);
+                const sz = Math.sqrt(Math.max(pt ? pointSize(pt) : 20, 5));
+                return <circle cx={cx} cy={cy} r={sz} fill={fill} opacity={op} />;
+              }}
+            />
+          );
+        })}
+
+        {/* K-Medoids medoid star markers */}
+        {medoidPoints && medoidPoints.map((m) => {
+          const fill = getClusterColor(m.cluster);
+          return (
+            <Scatter
+              key={`medoid-${m.cluster}`}
+              name={`medoid-${m.cluster}`}
+              data={[{ pc1: m.pc1, pc2: m.pc2, cluster: m.cluster }]}
+              fill={fill}
+              shape={(props: ScatterShapeProps) => {
+                const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
+                const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
+                // 5-pointed star path
+                const r = 8, ri = 3.5;
+                const pts: string[] = [];
+                for (let i = 0; i < 10; i++) {
+                  const angle = (i * Math.PI) / 5 - Math.PI / 2;
+                  const rad = i % 2 === 0 ? r : ri;
+                  pts.push(`${cx + rad * Math.cos(angle)},${cy + rad * Math.sin(angle)}`);
+                }
+                return (
+                  <polygon
+                    points={pts.join(" ")}
+                    fill={fill}
+                    stroke="#fff"
+                    strokeWidth={1.5}
+                    opacity={0.95}
+                  />
+                );
+              }}
+              legendType="none"
+            />
+          );
+        })}
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GMM Contour Plot
+// ---------------------------------------------------------------------------
+
+interface ContourEllipse {
+  clusterId: number;
+  mu1: number;
+  mu2: number;
+  /** Semi-axis 1 (1σ, in data units) */
+  a: number;
+  /** Semi-axis 2 (1σ, in data units) */
+  b: number;
+  /** Rotation angle in radians */
+  angle: number;
+}
+
+function computeClusterEllipses(points: PcaPoint[]): ContourEllipse[] {
+  const clusters = [...new Set(points.filter((p) => !p.isNoise && p.cluster >= 0).map((p) => p.cluster))];
+  return clusters.flatMap((c) => {
+    const pts = points.filter((p) => p.cluster === c);
+    if (pts.length < 3) return [];
+    const n = pts.length;
+    const mu1 = pts.reduce((s, p) => s + p.pc1, 0) / n;
+    const mu2 = pts.reduce((s, p) => s + p.pc2, 0) / n;
+    const v11 = pts.reduce((s, p) => s + (p.pc1 - mu1) ** 2, 0) / n;
+    const v22 = pts.reduce((s, p) => s + (p.pc2 - mu2) ** 2, 0) / n;
+    const v12 = pts.reduce((s, p) => s + (p.pc1 - mu1) * (p.pc2 - mu2), 0) / n;
+    const trace = v11 + v22;
+    const det = v11 * v22 - v12 ** 2;
+    const disc = Math.sqrt(Math.max(0, (trace / 2) ** 2 - det));
+    const lambda1 = trace / 2 + disc;
+    const lambda2 = trace / 2 - disc;
+    const angle = v12 !== 0 ? Math.atan2(lambda1 - v11, v12) : v11 >= v22 ? 0 : Math.PI / 2;
+    return [{ clusterId: c, mu1, mu2, a: Math.sqrt(Math.max(0, lambda1)), b: Math.sqrt(Math.max(0, lambda2)), angle }];
+  });
+}
+
+function buildEllipsePath(
+  e: ContourEllipse,
+  sigma: number,
+  xScale: (v: number) => number,
+  yScale: (v: number) => number,
+): string {
+  const pts = Array.from({ length: 72 }, (_, i) => {
+    const t = (2 * Math.PI * i) / 72;
+    const dx = sigma * e.a * Math.cos(t);
+    const dy = sigma * e.b * Math.sin(t);
+    const x = e.mu1 + dx * Math.cos(e.angle) - dy * Math.sin(e.angle);
+    const y = e.mu2 + dx * Math.sin(e.angle) + dy * Math.cos(e.angle);
+    return `${xScale(x).toFixed(1)},${yScale(y).toFixed(1)}`;
+  });
+  return `M${pts[0]}${pts.slice(1).map((p) => `L${p}`).join("")}Z`;
+}
+
+function PcaContourChart({
+  points,
+  pc1Label,
+  pc2Label,
+  pc1Variance,
+  pc2Variance,
+  pc1TopFeatures,
+  pc2TopFeatures,
+  segmentNames,
+  height = 340,
+}: PcaScatterProps) {
+  const clusterPoints = points.filter((p) => !p.isNoise && p.cluster !== -1);
+  const grouped: Record<number, (PcaPoint & { name: string })[]> = {};
+  for (const p of clusterPoints) {
+    if (!grouped[p.cluster]) grouped[p.cluster] = [];
+    grouped[p.cluster].push({ ...p, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}` });
+  }
+
+  const ellipses = useMemo(() => computeClusterEllipses(points), [points]);
+
+  // Axis label helpers (same as PcaScatterChart)
+  const formatAxisLabel = (label?: string, variance?: number, topFeatures?: string[]) => {
+    const parts: string[] = [];
+    if (label) parts.push(label);
+    if (variance != null) parts.push(`(${variance.toFixed(1)}% var.)`);
+    if (topFeatures?.length) parts.push(`· ${topFeatures.slice(0, 2).join(", ")}`);
+    return parts.join(" ") || undefined;
+  };
+  const xLabel = formatAxisLabel(pc1Label, pc1Variance, pc1TopFeatures);
+  const yLabel = formatAxisLabel(pc2Label, pc2Variance, pc2TopFeatures);
+
+  // Contour overlay rendered via recharts Customized
+  const ContourLayer = (props: Record<string, unknown>) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const xAxisMap = props["xAxisMap"] as Record<number, { scale: (v: number) => number }> | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const yAxisMap = props["yAxisMap"] as Record<number, { scale: (v: number) => number }> | undefined;
+    const xScale = xAxisMap?.[0]?.scale;
+    const yScale = yAxisMap?.[0]?.scale;
+    if (!xScale || !yScale) return null;
+
+    return (
+      <g>
+        {ellipses.flatMap((e) => {
+          const color = getClusterColor(e.clusterId);
+          const name = segmentNames[e.clusterId] ?? `Cluster ${e.clusterId}`;
+          const cx = xScale(e.mu1);
+          const cy = yScale(e.mu2);
+          return [
+            // 2σ outer ring — dashed border only
+            <path
+              key={`ellipse-${e.clusterId}-2s`}
+              d={buildEllipsePath(e, 2, xScale, yScale)}
+              fill="none"
+              stroke={color}
+              strokeWidth={1}
+              strokeDasharray="5 3"
+              opacity={0.45}
+            />,
+            // 1σ filled region
+            <path
+              key={`ellipse-${e.clusterId}-1s`}
+              d={buildEllipsePath(e, 1, xScale, yScale)}
+              fill={`${color}22`}
+              stroke={color}
+              strokeWidth={1.8}
+              opacity={0.9}
+            />,
+            // Center cross-hair
+            <circle key={`center-${e.clusterId}`} cx={cx} cy={cy} r={5} fill={color} opacity={0.95} />,
+            <text
+              key={`label-${e.clusterId}`}
+              x={cx + 7}
+              y={cy - 5}
+              fontSize={9}
+              fill={color}
+              fontWeight={600}
+              style={{ pointerEvents: "none", userSelect: "none" }}
+            >
+              {name.length > 18 ? name.slice(0, 17) + "…" : name}
+            </text>,
+          ];
+        })}
+      </g>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <ScatterChart margin={{ top: 20, right: 50, bottom: 55, left: 90 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+        <XAxis
+          type="number"
+          dataKey="pc1"
+          name={xLabel ?? "PC1"}
+          tick={{ fontSize: 10 }}
+          label={xLabel ? { value: xLabel, position: "insideBottom", offset: -30, fontSize: 11, fill: "#555" } : undefined}
+        />
+        <YAxis
+          type="number"
+          dataKey="pc2"
+          name={yLabel ?? "PC2"}
+          tick={{ fontSize: 10 }}
+          label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", offset: 20, fontSize: 11, fill: "#555" } : undefined}
+          width={80}
+        />
+        <Tooltip
+          cursor={false}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const d = payload[0]?.payload as PcaPoint & { name: string };
+            const color = getClusterColor(d.cluster);
+            return (
+              <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "#fff", border: "1px solid #e2e8f0" }}>
+                <p className="font-semibold mb-1" style={{ color }}>{d.name}</p>
+                <p style={{ color: "#555" }}>PC1: {d.pc1.toFixed(3)}</p>
+                <p style={{ color: "#555" }}>PC2: {d.pc2.toFixed(3)}</p>
+                {d.probability != null && <p style={{ color: "#555" }}>Probability: {(d.probability * 100).toFixed(1)}%</p>}
+              </div>
+            );
+          }}
+        />
+        <Legend
+          verticalAlign="top"
+          wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
+          formatter={(value: string) => <span style={{ color: "#444" }}>{value}</span>}
+        />
+        {/* Render faint scatter dots as background reference */}
+        {Object.entries(grouped).map(([cluster, pts]) => {
+          const clusterId = parseInt(cluster);
+          const fill = getClusterColor(clusterId);
+          const name = segmentNames[clusterId] ?? `Cluster ${clusterId}`;
+          return (
+            <Scatter
+              key={cluster}
+              name={name}
+              data={pts}
+              fill={fill}
+              opacity={0.18}
+              shape={() => null as unknown as React.ReactElement}
+            />
+          );
+        })}
+        {/* Ellipse contour overlay */}
+        <Customized component={ContourLayer as React.FC} />
       </ScatterChart>
     </ResponsiveContainer>
   );
@@ -2245,6 +2889,262 @@ function CaveatsCard({ caveats }: { caveats: string[] }) {
 }
 
 // ---------------------------------------------------------------------------
+// DataQualityAlerts — dismissible banners for model quality conditions
+// ---------------------------------------------------------------------------
+
+interface DqAlert {
+  id: string;
+  severity: "info" | "warning";
+  message: string;
+}
+
+function DataQualityAlerts({ data }: { data: SegmentationData }) {
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+
+  const alerts: DqAlert[] = [];
+
+  // Dropped features (generic low-variance)
+  if ((data.droppedFeatures?.length ?? 0) > 0) {
+    alerts.push({
+      id: "dropped_features",
+      severity: "info",
+      message: `${data.droppedFeatures!.length} feature${data.droppedFeatures!.length > 1 ? "s" : ""} were removed due to near-zero variance and had no segmentation impact: ${data.droppedFeatures!.slice(0, 3).join(", ")}${data.droppedFeatures!.length > 3 ? " and more" : ""}.`,
+    });
+  }
+
+  // Dropped user-protected features (warning)
+  if ((data.droppedProtected?.length ?? 0) > 0) {
+    alerts.push({
+      id: "dropped_protected",
+      severity: "warning",
+      message: `${data.droppedProtected!.length} user-specified feature${data.droppedProtected!.length > 1 ? "s" : ""} could not be included due to near-zero variance: ${data.droppedProtected!.slice(0, 3).join(", ")}${data.droppedProtected!.length > 3 ? " and more" : ""}.`,
+    });
+  }
+
+  // Re-encoded binary features
+  if ((data.reEncodedBinary?.length ?? 0) > 0) {
+    alerts.push({
+      id: "re_encoded_binary",
+      severity: "info",
+      message: `${data.reEncodedBinary!.length} sparse feature${data.reEncodedBinary!.length > 1 ? "s" : ""} ${data.reEncodedBinary!.length > 1 ? "were" : "was"} re-encoded as binary to reduce skew: ${data.reEncodedBinary!.slice(0, 3).join(", ")}${data.reEncodedBinary!.length > 3 ? " and more" : ""}.`,
+    });
+  }
+
+  // Flagged sparse features
+  if ((data.flaggedSparse?.length ?? 0) > 0) {
+    alerts.push({
+      id: "flagged_sparse",
+      severity: "warning",
+      message: `${data.flaggedSparse!.length} feature${data.flaggedSparse!.length > 1 ? "s" : ""} flagged as sparse but kept in original encoding — ${data.flaggedSparse!.length > 1 ? "they" : "it"} may introduce noise: ${data.flaggedSparse!.slice(0, 3).join(", ")}${data.flaggedSparse!.length > 3 ? " and more" : ""}.`,
+    });
+  }
+
+  // Low PCA variance
+  if (data.cumulativeVariance != null && data.cumulativeVariance < 0.5) {
+    alerts.push({
+      id: "low_pca_variance",
+      severity: "warning",
+      message: `The PCA scatter plot captures only ${(data.cumulativeVariance * 100).toFixed(0)}% of total variance. Cluster separation may look misleading — segments are better differentiated in higher dimensions.`,
+    });
+  }
+
+  // Low confidence
+  if (data.confidenceLabel === "Low") {
+    alerts.push({
+      id: "low_confidence",
+      severity: "warning",
+      message: `Model confidence is Low (silhouette ${data.silhouetteScore?.toFixed(3) ?? "n/a"}). Records are not well-separated between clusters — use results directionally and consider different feature selections.`,
+    });
+  }
+
+  // DBSCAN noise > 30%
+  const noiseCount = (data.algorithmParams as Record<string, unknown> | undefined)?.["noise_count"];
+  if (data.algorithm?.includes("DBSCAN") && typeof noiseCount === "number" && data.totalRecords && noiseCount / data.totalRecords > 0.3) {
+    alerts.push({
+      id: "dbscan_noise",
+      severity: "warning",
+      message: `${((noiseCount / data.totalRecords) * 100).toFixed(0)}% of records (${noiseCount.toLocaleString()}) were classified as noise/outliers by DBSCAN. Consider adjusting the epsilon or min_samples parameters.`,
+    });
+  }
+
+  // GMM not converged
+  const gmmConverged = (data.algorithmParams as Record<string, unknown> | undefined)?.["converged"];
+  if (data.algorithm?.includes("GMM") && gmmConverged === false) {
+    alerts.push({
+      id: "gmm_not_converged",
+      severity: "warning",
+      message: "The GMM did not converge. Results may be unstable — try increasing the iteration limit or reducing the number of components.",
+    });
+  }
+
+  // Feature weighting fallback
+  const weightMethod = data.featureWeighting?.method;
+  if (weightMethod && weightMethod.includes("fallback")) {
+    alerts.push({
+      id: "weight_fallback",
+      severity: "warning",
+      message: `Feature weighting fell back to entropy-only (method: ${weightMethod.replace(/_/g, " ")}). The Random Forest pipeline could not be applied — weights may be less accurate.`,
+    });
+  }
+
+  // RF OOB score too low
+  const rfOob = data.featureWeighting?.rfOobScore;
+  if (rfOob != null && rfOob < 0.5) {
+    alerts.push({
+      id: "low_oob",
+      severity: "warning",
+      message: `Random Forest OOB score is ${rfOob.toFixed(3)} — below the 0.5 threshold. Feature importance weights from this pipeline may not be reliable.`,
+    });
+  }
+
+  // Segments requested vs used mismatch
+  if (data.nSegmentsRequested != null && data.nSegmentsUsed != null && data.nSegmentsRequested !== data.nSegmentsUsed) {
+    alerts.push({
+      id: "segment_mismatch",
+      severity: "info",
+      message: `Requested ${data.nSegmentsRequested} segments but the algorithm settled on ${data.nSegmentsUsed}. This is normal for auto-K methods that optimise for cluster quality.`,
+    });
+  }
+
+  const visible = alerts.filter((a) => !dismissed.has(a.id));
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {visible.map((alert) => (
+        <div
+          key={alert.id}
+          className="flex items-start gap-2.5 rounded-xl px-4 py-3 text-xs"
+          style={{
+            background: alert.severity === "warning" ? "#fffbeb" : "#eff6ff",
+            border: `1px solid ${alert.severity === "warning" ? "#fde68a" : "#bfdbfe"}`,
+            color: alert.severity === "warning" ? "#92400e" : "#1e40af",
+          }}
+        >
+          <span className="mt-0.5 shrink-0" style={{ fontSize: 13 }}>
+            {alert.severity === "warning" ? "⚠" : "ℹ"}
+          </span>
+          <span className="flex-1 leading-relaxed">{alert.message}</span>
+          <button
+            onClick={() => setDismissed((prev) => new Set([...prev, alert.id]))}
+            className="shrink-0 ml-1 opacity-50 hover:opacity-100 transition-opacity"
+            title="Dismiss"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FeatureWeightsCard — horizontal bar chart of feature_weighting.final_weights
+// ---------------------------------------------------------------------------
+
+function FeatureWeightsCard({ weights, method }: { weights: Record<string, number>; method?: string }) {
+  const [collapsed, setCollapsed] = useState(true);
+
+  // Sort by weight descending
+  const sorted = Object.entries(weights)
+    .sort(([, a], [, b]) => b - a)
+    .map(([feature, weight]) => ({
+      feature: feature.replace(/_/g, " "),
+      rawFeature: feature,
+      weight,
+      strength: weight >= 1.5 ? "strong" : weight >= 0.5 ? "moderate" : "weak",
+    }));
+
+  if (sorted.length === 0) return null;
+
+  const getBarColor = (weight: number) =>
+    weight >= 1.5 ? "#4E79A7"   // strong — blue
+    : weight >= 0.5 ? "#76B7B2" // moderate — teal
+    : "#BAB0AC";                 // weak — gray
+
+  const methodLabel = method ? ` · ${method.replace(/_/g, " ")}` : "";
+
+  return (
+    <div className="rounded-2xl" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+      <button
+        onClick={() => setCollapsed((v) => !v)}
+        className="w-full flex items-center justify-between px-5 py-3.5 rounded-2xl hover:bg-black/4 transition-colors text-left"
+      >
+        <div className="flex items-center gap-2 flex-wrap">
+          <BarChart2 size={15} style={{ color: "var(--text-muted)" }} />
+          <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+            Feature Weights
+          </span>
+          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--border)", color: "var(--text-muted)" }}>
+            {sorted.length} features{methodLabel}
+          </span>
+        </div>
+        {collapsed
+          ? <ChevronDown size={14} style={{ color: "var(--text-muted)" }} />
+          : <ChevronUp   size={14} style={{ color: "var(--text-muted)" }} />
+        }
+      </button>
+
+      {!collapsed && (
+        <div className="px-5 pb-5" style={{ borderTop: "1px solid var(--border)" }}>
+          <p className="text-xs mt-3 mb-3" style={{ color: "var(--text-muted)" }}>
+            Relative importance weights assigned to each feature before clustering. Weight &gt; 1.5 = strong influence, 0.5–1.5 = moderate, &lt; 0.5 = weak. Reference line at 1.0 = neutral weight.
+          </p>
+          <ResponsiveContainer width="100%" height={Math.max(180, sorted.length * 26)}>
+            <BarChart
+              data={sorted}
+              layout="vertical"
+              margin={{ top: 4, right: 60, bottom: 4, left: 140 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(0,0,0,0.06)" />
+              <XAxis type="number" domain={[0, "dataMax + 0.2"]} tick={{ fontSize: 10 }} />
+              <YAxis
+                type="category"
+                dataKey="feature"
+                width={130}
+                tick={{ fontSize: 10, fill: "var(--text-secondary)" }}
+              />
+              <ReferenceLine x={1} stroke="#9ca3af" strokeDasharray="4 4" label={{ value: "1.0", position: "top", fontSize: 9, fill: "#9ca3af" }} />
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null;
+                  const d = payload[0].payload as { feature: string; weight: number; strength: string };
+                  return (
+                    <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+                      <p className="font-semibold">{d.feature}</p>
+                      <p style={{ color: "var(--text-muted)" }}>Weight: <span className="font-medium" style={{ color: "var(--text-primary)" }}>{d.weight.toFixed(4)}</span></p>
+                      <p style={{ color: "var(--text-muted)" }}>Influence: <span className="font-medium capitalize">{d.strength}</span></p>
+                    </div>
+                  );
+                }}
+              />
+              <Bar dataKey="weight" radius={[0, 3, 3, 0]} barSize={16}>
+                {sorted.map((entry) => (
+                  <Cell key={entry.rawFeature} fill={getBarColor(entry.weight)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          {/* Legend */}
+          <div className="flex flex-wrap gap-4 mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
+            {[
+              { color: "#4E79A7", label: "Strong (≥1.5)" },
+              { color: "#76B7B2", label: "Moderate (0.5–1.5)" },
+              { color: "#BAB0AC", label: "Weak (<0.5)" },
+            ].map(({ color, label }) => (
+              <span key={label} className="flex items-center gap-1.5">
+                <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: color }} />
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Membership Table
 // ---------------------------------------------------------------------------
 
@@ -2293,7 +3193,7 @@ function MembershipTable({ members, segmentNames, onDownloadCSV, onFullscreen }:
           </thead>
           <tbody>
             {visibleMembers.map((m, i) => {
-              const pal = PALETTES[m.cluster % PALETTES.length];
+              const pal = getClusterPalette(m.cluster);
               return (
                 <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
                   <td className="px-3 py-2" style={{ color: "var(--text-primary)" }}>{String(m.id)}</td>
@@ -2365,55 +3265,75 @@ export default function SegmentationArtifact({ artifact }: Props) {
   let segData: SegmentationData;
 
   if (rawData && typeof rawData === "object") {
-    // ── 1. Try result-table format first (PC1/PC2/MODEL_METADATA columns)
-    const fromTable = fromResultTable(rawData);
-    if (fromTable) {
-      // Enrich with narrative descriptions if the table has no descriptions
-      const narrativeData = artifact.narrative
-        ? parseClusteringNarrative(artifact.narrative)
-        : null;
-      if (narrativeData && narrativeData.segments.length > 0) {
-        for (const seg of fromTable.segments) {
-          const narSeg = narrativeData.segments.find((ns) => ns.id === seg.id);
-          if (narSeg) {
-            if (!seg.description && narSeg.description) seg.description = narSeg.description;
-            if (!seg.topDriver   && narSeg.topDriver)   seg.topDriver   = narSeg.topDriver;
+    // ── 0. Fast path: data is already a fully-parsed SegmentationData object.
+    //    page.tsx calls fromResultTable() during SSE streaming and stores the result
+    //    directly.  On re-render the component receives that pre-parsed object back
+    //    as artifact.data — it has 'segments', 'featureWeighting', 'pcaPoints', etc.
+    //    Using it directly avoids a double-parse and, critically, preserves fields
+    //    (like featureWeighting) that fromV2ClusterData() doesn't know about.
+    if (Array.isArray(rawData["segments"]) && rawData["featureWeighting"] !== undefined) {
+      segData = rawData as unknown as SegmentationData;
+    } else {
+      // ── 1. Try result-table format first (PC1/PC2/MODEL_METADATA columns)
+      const fromTable = fromResultTable(rawData);
+      if (fromTable) {
+        // Enrich with narrative descriptions if the table has no descriptions
+        const narrativeData = artifact.narrative
+          ? parseClusteringNarrative(artifact.narrative)
+          : null;
+        if (narrativeData && narrativeData.segments.length > 0) {
+          for (const seg of fromTable.segments) {
+            const narSeg = narrativeData.segments.find((ns) => ns.id === seg.id);
+            if (narSeg) {
+              if (!seg.description && narSeg.description) seg.description = narSeg.description;
+              if (!seg.topDriver   && narSeg.topDriver)   seg.topDriver   = narSeg.topDriver;
+            }
+          }
+          if (!fromTable.interpretation && narrativeData.interpretation) {
+            fromTable.interpretation = narrativeData.interpretation;
+          }
+          if (!fromTable.caveats?.length && narrativeData.caveats?.length) {
+            fromTable.caveats = narrativeData.caveats;
           }
         }
-        if (!fromTable.interpretation && narrativeData.interpretation) {
-          fromTable.interpretation = narrativeData.interpretation;
-        }
-        if (!fromTable.caveats?.length && narrativeData.caveats?.length) {
-          fromTable.caveats = narrativeData.caveats;
-        }
-      }
-      segData = fromTable;
+        segData = fromTable;
 
-    // ── 2. v2 structured { segments: [...] } data
-    } else if (Array.isArray((rawData)["segments"]) || typeof rawData["algorithm"] === "string") {
-      segData = fromV2ClusterData(rawData);
-      // Enrich with z-scores from narrative if segments have no z-scores yet
-      if (artifact.narrative && segData.segments.some((s) => !s.zScores || Object.keys(s.zScores).length === 0)) {
-        extractInlineZScores(artifact.narrative, segData.segments);
-        extractMetricsIntoSegments(artifact.narrative, segData.segments);
-        computeZScoresInPlace(segData.segments);
+      // ── 2. v2 structured { segments: [...] } data
+      } else if (Array.isArray((rawData)["segments"]) || typeof rawData["algorithm"] === "string") {
+        segData = fromV2ClusterData(rawData);
+
+        // Enrich z-scores: always scan segment descriptions (which contain inline z-scores
+        // like "Z=+1.96"), and also parse any available narrative text.
+        // NOTE: extractInlineZScores internally scans seg.description / topDriver even when
+        // the text argument is empty, so we always call it unconditionally.
+        const enrichText = artifact.narrative || segData.interpretation || "";
+        if (segData.segments.some((s) => !s.zScores || Object.keys(s.zScores).length === 0)) {
+          // Scan the narrative (or interpretation fallback) for Segment N blocks
+          extractInlineZScores(enrichText, segData.segments);
+          // Always scan each segment's own description / topDriver / characteristics
+          // Pass empty string so it only hits the per-segment description scan
+          extractInlineZScores("", segData.segments);
+          if (enrichText) extractMetricsIntoSegments(enrichText, segData.segments);
+          computeZScoresInPlace(segData.segments);
+        }
+        // Build PCA centroid points from z-scores when not already present
         if (!segData.pcaPoints?.length) {
           const pcaResult = computeSegmentPca(segData.segments);
           if (pcaResult && pcaResult.points.length > 0) {
-            segData.pcaPoints     = pcaResult.points;
-            segData.pc1Variance   = pcaResult.pc1Variance;
-            segData.pc2Variance   = pcaResult.pc2Variance;
+            segData.pcaPoints      = pcaResult.points;
+            segData.pc1Variance    = pcaResult.pc1Variance;
+            segData.pc2Variance    = pcaResult.pc2Variance;
             segData.pc1TopFeatures = pcaResult.pc1TopFeatures;
             segData.pc2TopFeatures = pcaResult.pc2TopFeatures;
             segData.pc1Label = "PC1";
             segData.pc2Label = "PC2";
           }
         }
-      }
 
-    // ── 3. Fall back to narrative parsing
-    } else {
-      segData = parseClusteringNarrative(artifact.narrative ?? "");
+      // ── 3. Fall back to narrative parsing
+      } else {
+        segData = parseClusteringNarrative(artifact.narrative ?? "");
+      }
     }
   } else {
     segData = parseClusteringNarrative(artifact.narrative ?? "");
@@ -2536,16 +3456,26 @@ export default function SegmentationArtifact({ artifact }: Props) {
   );
 
   const hasFeaturesUsed = Array.isArray(segData.featuresUsed) && segData.featuresUsed.length > 0;
+  // Show the features card if there is ANY feature metadata available — active, dropped, or encoded.
+  const hasAnyFeatureData = hasFeaturesUsed
+    || (segData.droppedFeatures?.length ?? 0) > 0
+    || (segData.droppedProtected?.length ?? 0) > 0
+    || (segData.reEncodedBinary?.length ?? 0) > 0
+    || (segData.flaggedSparse?.length ?? 0) > 0
+    || (segData.userProtectedFeatures?.length ?? 0) > 0;
 
   return (
     <div className="flex flex-col gap-5 w-full">
       {/* 1. Model Performance */}
       <ModelPerformanceCard data={segData} />
 
-      {/* 2. Features ribbon */}
-      {hasFeaturesUsed && (
+      {/* 2. Data Quality Alerts — dismissible banners */}
+      <DataQualityAlerts data={segData} />
+
+      {/* 3. Features ribbon — shown whenever ANY feature metadata is present */}
+      {hasAnyFeatureData && (
         <ModelFeaturesCard
-          featuresUsed={segData.featuresUsed!}
+          featuresUsed={segData.featuresUsed ?? []}
           nFeaturesInput={segData.nFeaturesInput}
           nFeaturesActive={segData.nFeaturesActive}
           droppedFeatures={segData.droppedFeatures}
@@ -2553,9 +3483,11 @@ export default function SegmentationArtifact({ artifact }: Props) {
           reEncodedBinary={segData.reEncodedBinary}
           flaggedSparse={segData.flaggedSparse}
           userProtectedFeatures={segData.userProtectedFeatures}
+          finalWeights={segData.featureWeighting?.finalWeights}
+          entropyWeights={segData.featureWeighting?.entropyWeights}
           onDownload={() => {
             const rows: (string | number)[][] = [
-              ...[...segData.featuresUsed!].sort().map((f) => [f, "Used in Clustering"]),
+              ...[...(segData.featuresUsed ?? [])].sort().map((f) => [f, "Used in Clustering"]),
               ...(segData.userProtectedFeatures ?? []).map((f) => [f, "User-Specified (Protected)"]),
               ...(segData.reEncodedBinary ?? []).map((f) => [f, "Re-encoded for Sparsity"]),
               ...(segData.flaggedSparse ?? []).map((f) => [f, "Flagged Sparse – Kept"]),
@@ -2567,10 +3499,10 @@ export default function SegmentationArtifact({ artifact }: Props) {
         />
       )}
 
-      {/* 3. Segment Profiles */}
+      {/* 4. Segment Profiles */}
       <SegmentProfilesSection segments={segments} onDownload={handleDownloadPptx} />
 
-      {/* 4. PCA / Contour Plot */}
+      {/* 5. PCA / Contour Plot */}
       {hasPca && (
         <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="flex items-center justify-between mb-3">
@@ -2600,18 +3532,31 @@ export default function SegmentationArtifact({ artifact }: Props) {
               Bubble size reflects segment population share. Distance between bubbles indicates how distinct segments are.
             </p>
           )}
-          <div ref={pcaRef}>
-            <PcaScatterChart
-              points={pcaPoints!}
-              pc1Label={segData.pc1Label}
-              pc2Label={segData.pc2Label}
-              pc1Variance={segData.pc1Variance}
-              pc2Variance={segData.pc2Variance}
-              pc1TopFeatures={segData.pc1TopFeatures}
-              pc2TopFeatures={segData.pc2TopFeatures}
-              segmentNames={segmentNames}
-            />
-          </div>
+          {segData.cumulativeVariance != null && (
+            <p className="text-xs mb-2" style={{ color: "var(--text-muted)", opacity: 0.8 }}>
+              2D projection captures <strong>{(segData.cumulativeVariance * 100).toFixed(0)}%</strong> of total feature variance.
+            </p>
+          )}
+          {/* GMM uses a contour (ellipse) plot; all other algorithms use a scatter plot */}
+          {(() => {
+            const isGMM = /\b(gm|gmm|gaussian.mixture)\b/i.test(segData.algorithm ?? "");
+            const ChartComponent = isGMM ? PcaContourChart : PcaScatterChart;
+            return (
+              <div ref={pcaRef}>
+                <ChartComponent
+                  points={pcaPoints!}
+                  pc1Label={segData.pc1Label}
+                  pc2Label={segData.pc2Label}
+                  pc1Variance={segData.pc1Variance}
+                  pc2Variance={segData.pc2Variance}
+                  pc1TopFeatures={segData.pc1TopFeatures}
+                  pc2TopFeatures={segData.pc2TopFeatures}
+                  segmentNames={segmentNames}
+                  medoidPoints={segData.medoidPoints}
+                />
+              </div>
+            );
+          })()}
           {/* Variance breakdown note below chart */}
           {(segData.pc1Variance != null || segData.pc2Variance != null) && (() => {
             const v1 = segData.pc1Variance;
@@ -2648,7 +3593,15 @@ export default function SegmentationArtifact({ artifact }: Props) {
         </div>
       )}
 
-      {/* 5. Z-score Snake Plot */}
+      {/* 6. Feature Weights Chart — collapsible, only when final_weights present */}
+      {segData.featureWeighting?.finalWeights && Object.keys(segData.featureWeighting.finalWeights).length > 0 && (
+        <FeatureWeightsCard
+          weights={segData.featureWeighting.finalWeights}
+          method={segData.featureWeighting.method}
+        />
+      )}
+
+      {/* 7. Z-score Snake Plot */}
       {hasZScores && (
         <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="flex items-center justify-between mb-3">
@@ -2674,7 +3627,7 @@ export default function SegmentationArtifact({ artifact }: Props) {
         </div>
       )}
 
-      {/* 6. Z-Score Heatmap */}
+      {/* 8. Z-Score Heatmap */}
       {hasZScores && (
         <div className="rounded-2xl p-5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="flex items-center justify-between mb-3">
@@ -2698,10 +3651,10 @@ export default function SegmentationArtifact({ artifact }: Props) {
         </div>
       )}
 
-      {/* 7. Caveats */}
+      {/* 9. Caveats */}
       {caveats && caveats.length > 0 && <CaveatsCard caveats={caveats} />}
 
-      {/* 8. Membership Table */}
+      {/* 10. Membership Table */}
       {hasMembership && (
         <MembershipTable
           members={membershipTable!}
@@ -2721,21 +3674,28 @@ export default function SegmentationArtifact({ artifact }: Props) {
       {/* ── Fullscreen Overlays ─────────────────────────────────────────────── */}
       {fullscreen === "pca" && hasPca && (
         <FullscreenOverlay
-          title="Segment Contour Plot (PC1 × PC2)"
+          title={/\b(gm|gmm|gaussian.mixture)\b/i.test(segData.algorithm ?? "") ? "Segment Contour Plot — GMM (PC1 × PC2)" : "Segment Scatter Plot (PC1 × PC2)"}
           onClose={() => setFullscreen(null)}
           actions={pcaDownloadActions}
         >
-          <PcaScatterChart
-            points={pcaPoints!}
-            pc1Label={segData.pc1Label}
-            pc2Label={segData.pc2Label}
-            pc1Variance={segData.pc1Variance}
-            pc2Variance={segData.pc2Variance}
-            pc1TopFeatures={segData.pc1TopFeatures}
-            pc2TopFeatures={segData.pc2TopFeatures}
-            segmentNames={segmentNames}
-            height={Math.max(500, (typeof window !== "undefined" ? window.innerHeight : 700) - 160)}
-          />
+          {(() => {
+            const isGMM = /\b(gm|gmm|gaussian.mixture)\b/i.test(segData.algorithm ?? "");
+            const FSChart = isGMM ? PcaContourChart : PcaScatterChart;
+            return (
+              <FSChart
+                points={pcaPoints!}
+                pc1Label={segData.pc1Label}
+                pc2Label={segData.pc2Label}
+                pc1Variance={segData.pc1Variance}
+                pc2Variance={segData.pc2Variance}
+                pc1TopFeatures={segData.pc1TopFeatures}
+                pc2TopFeatures={segData.pc2TopFeatures}
+                segmentNames={segmentNames}
+                medoidPoints={segData.medoidPoints}
+                height={Math.max(500, (typeof window !== "undefined" ? window.innerHeight : 700) - 160)}
+              />
+            );
+          })()}
         </FullscreenOverlay>
       )}
 

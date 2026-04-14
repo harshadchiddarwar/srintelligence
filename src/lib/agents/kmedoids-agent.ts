@@ -9,13 +9,15 @@
 
 /**
  * KMedoidsClusterAgent — K-Medoids (PAM) clustering via
- * CORTEX_TESTING.ML.CLUSTER_KMEDOIDS table-valued function.
+ * CORTEX_TESTING.ML.KMEDOIDS_CLUSTER stored procedure.
  *
- * SQL pattern (ALWAYS use TABLE(), NEVER CALL):
- *   SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_KMEDOIDS(CURSOR(...), n_clusters))
+ * SQL pattern — ALWAYS use CALL with a dollar-quoted input query string:
+ *   CALL CORTEX_TESTING.ML.KMEDOIDS_CLUSTER($$<input_query>$$, n_clusters)
  *
  * K-Medoids is more robust to outliers than K-Means because cluster
  * centers are actual data points (medoids), not coordinate means.
+ * Pass 0 to let the procedure auto-detect the optimum k.
+ * Results are written to CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS.
  */
 
 import type { AgentInput, AgentIntent } from '../../types/agent';
@@ -47,16 +49,9 @@ export class KMedoidsClusterAgent extends BaseAgent {
     const sourceSQL = input.extraContext!.sourceSQL as string;
     const nClusters = (input.extraContext?.nSegments as number | undefined) ?? DEFAULT_N_CLUSTERS;
 
-    return [
-      `WITH SOURCE_DATA AS (`,
-      sourceSQL.trim(),
-      `)`,
-      `SELECT * FROM TABLE(CORTEX_TESTING.ML.CLUSTER_KMEDOIDS(`,
-      `  CURSOR(SELECT * FROM SOURCE_DATA),`,
-      `  ${nClusters}`,
-      `))`,
-      `ORDER BY CLUSTER_ID`,
-    ].join('\n');
+    // Procedures are called with CALL, not SELECT * FROM TABLE().
+    // The input query is passed as a dollar-quoted VARCHAR; n_clusters=0 → auto-detect.
+    return `CALL CORTEX_TESTING.ML.KMedoids_cluster($$${sourceSQL.trim()}$$, ${nClusters})`;
   }
 
   parseResults(

@@ -51,13 +51,26 @@ function parseRoles(raw: unknown): string[] {
 }
 
 function rowToSemanticViewRef(row: Record<string, unknown>): SemanticViewRef {
+  // The registry stores the semantic model path split across four columns.
+  // Cortex Analyst expects: @DATABASE.SCHEMA.STAGE_NAME/yaml_filename
+  const db    = String(row['DATABASE_NAME'] ?? '').trim();
+  const schema = String(row['SCHEMA_NAME']  ?? '').trim();
+  const stage  = String(row['STAGE_NAME']   ?? '').trim();
+  const yaml   = String(row['YAML_FILENAME'] ?? '').trim();
+
+  // Detect unfilled template placeholders (e.g. "<YOUR_STAGE_NAME>")
+  const isPlaceholder = (s: string) => s.includes('<') || s.includes('>') || s === '';
+  const fullyQualifiedName =
+    (db && schema && stage && yaml &&
+     !isPlaceholder(db) && !isPlaceholder(schema) && !isPlaceholder(stage) && !isPlaceholder(yaml))
+      ? `@${db}.${schema}.${stage}/${yaml}`
+      : String(row['FULLY_QUALIFIED_NAME'] ?? row['fully_qualified_name'] ?? '');
+
   return {
     id: String(row['VIEW_ID'] ?? row['view_id'] ?? ''),
     displayName: String(row['DISPLAY_NAME'] ?? row['display_name'] ?? ''),
     description: String(row['DESCRIPTION'] ?? row['description'] ?? ''),
-    fullyQualifiedName: String(
-      row['FULLY_QUALIFIED_NAME'] ?? row['fully_qualified_name'] ?? '',
-    ),
+    fullyQualifiedName,
     allowedRoles: parseRoles(row['ALLOWED_ROLES'] ?? row['allowed_roles']),
     isDefault:
       (row['IS_DEFAULT'] ?? row['is_default']) === true ||
@@ -79,14 +92,7 @@ const FALLBACK_VIEW: SemanticViewRef = {
 
 async function loadViewsFromSnowflake(userRole: string): Promise<SemanticViewRef[]> {
   const sql = `
-    SELECT
-      view_id,
-      display_name,
-      description,
-      fully_qualified_name,
-      allowed_roles,
-      is_default,
-      tags
+    SELECT *
     FROM CORTEX_TESTING.PUBLIC.SEMANTIC_VIEW_REGISTRY
     WHERE is_active = TRUE
     ORDER BY display_name ASC
@@ -104,6 +110,7 @@ async function loadViewsFromSnowflake(userRole: string): Promise<SemanticViewRef
     const upperRole = userRole.toUpperCase();
     const filtered = result.rows
       .map(rowToSemanticViewRef)
+      .filter((v) => v.fullyQualifiedName !== '') // drop rows with unfilled placeholders
       .filter(
         (v) =>
           v.allowedRoles.length === 0 ||
@@ -111,8 +118,12 @@ async function loadViewsFromSnowflake(userRole: string): Promise<SemanticViewRef
       );
 
     return filtered.length > 0 ? filtered : [FALLBACK_VIEW];
-  } catch {
-    // SEMANTIC_VIEW_REGISTRY table not yet created — use hardcoded fallback
+  } catch (err) {
+    // SEMANTIC_VIEW_REGISTRY table not yet created, or role lacks SELECT —
+    // use the hardcoded fallback.  Log at debug level only to avoid noisy
+    // 422 warnings on every startup.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.debug('[semantic-discovery] Registry unavailable, using fallback:', msg.slice(0, 120));
     return [FALLBACK_VIEW];
   }
 }
@@ -164,14 +175,7 @@ export async function getSemanticViewById(
   // Fall back to a direct SQL lookup
   const escapedId = viewId.replace(/'/g, "''");
   const sql = `
-    SELECT
-      view_id,
-      display_name,
-      description,
-      fully_qualified_name,
-      allowed_roles,
-      is_default,
-      tags
+    SELECT *
     FROM CORTEX_TESTING.PUBLIC.SEMANTIC_VIEW_REGISTRY
     WHERE view_id = '${escapedId}'
       AND is_active = TRUE

@@ -14,6 +14,8 @@ interface AgentModel {
   description: string;
   /** Tag inserted into the textarea */
   tag: string;
+  /** Optional prompt template inserted after the tag (placeholders wrapped in []) */
+  template?: string;
 }
 
 interface AgentOption {
@@ -60,11 +62,36 @@ const AGENT_OPTIONS: AgentOption[] = [
     description: "Unsupervised patient & plan segmentation",
     tag: "@Clustering",
     models: [
-      { id: "auto",     label: "Auto (best-fit)", description: "Let SRI pick the optimal algorithm", tag: "@Clustering"           },
-      { id: "gmm",      label: "GMM",             description: "Gaussian Mixture Model",             tag: "@Clustering/GMM"       },
-      { id: "kmeans",   label: "K-Means",         description: "Classic centroid clustering",        tag: "@Clustering/K-Means"   },
-      { id: "dbscan",   label: "DBSCAN",          description: "Density-based spatial clustering",   tag: "@Clustering/DBSCAN"    },
-      { id: "kmedoids", label: "K-Medoids",       description: "Robust variant of K-Means",          tag: "@Clustering/K-Medoids" },
+      {
+        id: "auto", label: "Auto (best-fit)", description: "Let SRI pick the optimal algorithm",
+        tag: "@Clustering",
+        template: "Segment [describe your population, e.g. physicians / patients / plans] into [N or 0 for auto-K] clusters using features: [feature1, feature2, ...]",
+      },
+      {
+        id: "kmeans", label: "K-Means", description: "Classic centroid clustering",
+        tag: "@Clustering/KMeans",
+        template: "Segment [describe your population] into [N or 0 for auto-K] clusters using features: [feature1, feature2, ...]",
+      },
+      {
+        id: "gmm", label: "GMM", description: "Gaussian Mixture Model (soft assign)",
+        tag: "@Clustering/GMM",
+        template: "Segment [describe your population] into [N or 0 for auto-K] clusters using GMM (Gaussian Mixture Model) with features: [feature1, feature2, ...]",
+      },
+      {
+        id: "dbscan", label: "DBSCAN", description: "Density-based spatial clustering",
+        tag: "@Clustering/DBSCAN",
+        template: "Segment [describe your population] using density-based clustering on features: [feature1, feature2, ...] (number of clusters is determined automatically)",
+      },
+      {
+        id: "hierarchical", label: "Hierarchical", description: "Agglomerative hierarchical clustering",
+        tag: "@Clustering/Hierarchical",
+        template: "Segment [describe your population] into [N or 0 for auto-K] hierarchical clusters using features: [feature1, feature2, ...]",
+      },
+      {
+        id: "kmedoids", label: "K-Medoids", description: "Robust variant of K-Means",
+        tag: "@Clustering/KMedoids",
+        template: "Segment [describe your population] into [N or 0 for auto-K] clusters using K-Medoids on features: [feature1, feature2, ...]",
+      },
     ],
   },
   {
@@ -210,11 +237,34 @@ export default function ChatInput({
     const agent = AGENT_OPTIONS[aIdx];
     const model = mIdx !== undefined ? agent.models?.[mIdx] : undefined;
     const tag = model ? model.tag : agent.tag;
-    setValue((v) => v.slice(0, v.lastIndexOf("/")) + tag + " ");
+    const template = model?.template ?? undefined;
+
+    // Build the full text: replace everything from the last "/" up to cursor
+    const newText = template
+      ? `${tag} ${template}`
+      : `${tag} `;
+
+    setValue((v) => v.slice(0, v.lastIndexOf("/")) + newText);
     closeAllPopups();
     setAgentIdx(0);
     setModelIdx(0);
-    requestAnimationFrame(() => textareaRef.current?.focus());
+
+    // If there's a template, select the first placeholder so user can type over it
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      if (template) {
+        const fullVal = el.value;
+        const start = fullVal.indexOf("[");
+        const end = fullVal.indexOf("]");
+        if (start !== -1 && end !== -1) {
+          el.setSelectionRange(start, end + 1);
+        }
+      } else {
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    });
   };
 
   const selectSemanticView = (id: string, name: string) => {
@@ -394,7 +444,7 @@ export default function ChatInput({
 
           {/* Model sub-list — appears when hovered agent has models */}
           {currentAgent.models && (
-            <div style={{ minWidth: 210 }}>
+            <div style={{ minWidth: 230 }}>
               <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
                 <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>Select model</p>
                 <p style={{ fontSize: "10px", color: "var(--text-muted)" }}>↑↓ navigate · Enter select · ← back</p>

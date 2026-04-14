@@ -74,6 +74,8 @@ interface SnowflakeResultSetMetaData {
 
 interface SnowflakeStatementResponse {
   statementHandle?: string;
+  /** Returned instead of (or alongside) statementHandle for multi-statement requests */
+  statementHandles?: string[];
   resultSetMetaData?: SnowflakeResultSetMetaData;
   data?: (string | null)[][];
   code?: string;
@@ -204,17 +206,26 @@ async function pollForResult(
 
     pollCount++;
     const response = await fetch(url, { method: 'GET', headers, signal });
-    console.log(`SQL_API_POLL_${pollCount}: status=${response.status}`);
+    console.log(`SQL_API_POLL_${pollCount}: httpStatus=${response.status}`);
+
+    // Snowflake may return 202 on the GET poll while the query is still starting.
+    // Treat any non-200 success status as "still running".
+    if (response.status === 202) {
+      console.log(`SQL_API_POLL_${pollCount}: 202 still async, continuing`);
+      continue;
+    }
 
     if (!response.ok) {
       throw new SnowflakeError(`Async poll failed: HTTP ${response.status}`);
     }
 
     const json = (await response.json()) as SnowflakeStatementResponse;
-    const status = json.status ?? '';
+    // Normalise to uppercase — Snowflake may return 'running' or 'RUNNING'
+    const status = (json.status ?? '').toUpperCase();
+    console.log(`SQL_API_POLL_${pollCount}: execStatus=${status} hasMetadata=${!!json.resultSetMetaData}`);
 
-    if (status === 'RUNNING' || status === 'QUEUED') {
-      // Check once more after getting the response (race condition guard)
+    if (status === 'RUNNING' || status === 'QUEUED' || status === '') {
+      // '' means no status field yet — still starting up
       if (signal?.aborted) {
         await cancelSnowflakeStatement(handle, headers);
         throw new DOMException('Aborted', 'AbortError');
@@ -222,14 +233,20 @@ async function pollForResult(
       continue;
     }
 
-    if (status === 'FAILED_WITH_ERROR') {
+    if (status === 'FAILED_WITH_ERROR' || status === 'ABORTED' || status === 'ABORTING') {
       throw new SnowflakeError(json.message ?? 'Statement failed', {
         code: json.code,
         sqlState: json.sqlState,
       });
     }
 
-    // SUCCESS or any other terminal state
+    // SUCCESS (or any other unrecognised terminal state with resultSetMetaData)
+    if (!json.resultSetMetaData) {
+      // Shouldn't happen for SUCCESS, but guard against it
+      console.warn(`SQL_API_POLL_${pollCount}: status=${status} but no resultSetMetaData — continuing`);
+      continue;
+    }
+
     console.log('SQL_API_POLL_COUNT:', pollCount);
     return json;
   }
@@ -249,35 +266,36 @@ async function pollForResult(
 export async function executeSQL(sql: string, userRole?: string, signal?: AbortSignal): Promise<SQLResult> {
   const headers = await authManager.getAuthHeaders();
 
-  let statement = sql;
-  const extraHeaders: Record<string, string> = {};
+  // Unique per-call label so concurrent executeSQL() invocations don't collide
+  // on the same console.time() namespace.
+  const callId = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 
-  if (userRole) {
-    const safeRole = userRole.replace(/[^A-Za-z0-9_$]/g, '');
-    statement = `USE ROLE ${safeRole};\n${sql}`;
-    // 0 = no fixed count; Snowflake uses MULTI_STATEMENT_COUNT: "0" to allow
-    // any number of statements in a single request.
-    extraHeaders['MULTI_STATEMENT_COUNT'] = '0';
-  }
+  // Strip any stray semicolons so the SQL API always receives a single statement.
+  const statement = sql.replace(/;/g, '').trim();
 
-  const requestBody = {
+  // Snowflake SQL API v2 accepts `role` as a body parameter, which is cleaner
+  // than prepending "USE ROLE x;" (which would require MULTI_STATEMENT_COUNT).
+  const safeRole = userRole ? userRole.replace(/[^A-Za-z0-9_$]/g, '') : undefined;
+
+  const requestBody: Record<string, unknown> = {
     statement,
     timeout: STATEMENT_TIMEOUT_S,
     warehouse: WAREHOUSE,
     database: DATABASE,
     schema: 'PUBLIC',
     resultSetMetaData: { format: 'json' },
+    ...(safeRole ? { role: safeRole } : {}),
   };
 
-  console.time('SQL_API_POST');
+  console.time(`SQL_API_POST:${callId}`);
   const response = await fetch(`${BASE_URL}/api/v2/statements`, {
     method: 'POST',
-    headers: { ...headers, ...extraHeaders },
+    headers,
     signal,
     body: JSON.stringify(requestBody),
   });
-  console.timeEnd('SQL_API_POST');
-  console.log('SQL_API_STATUS:', response.status);
+  console.timeEnd(`SQL_API_POST:${callId}`);
+  console.log(`SQL_API_STATUS:${callId}:`, response.status);
 
   let json: SnowflakeStatementResponse;
 
@@ -287,7 +305,12 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
   } else if (response.status === 202) {
     // Asynchronous — poll until done
     const accepted = (await response.json()) as SnowflakeStatementResponse;
-    const handle = accepted.statementHandle;
+    // For multi-statement requests (e.g. USE ROLE x; CALL proc(...)), Snowflake
+    // returns `statementHandles` (plural array) instead of the singular
+    // `statementHandle`.  We want the LAST handle — that is the CALL result.
+    const handle =
+      accepted.statementHandle ??
+      accepted.statementHandles?.[accepted.statementHandles.length - 1];
     if (!handle) {
       throw new SnowflakeError('Async statement returned no statementHandle');
     }
@@ -300,9 +323,9 @@ export async function executeSQL(sql: string, userRole?: string, signal?: AbortS
     signal?.addEventListener('abort', () => {
       cancelSnowflakeStatement(handle, headers).catch(() => {});
     }, { once: true });
-    console.time('SQL_API_POLL');
+    console.time(`SQL_API_POLL:${callId}`);
     json = await pollForResult(handle, headers, signal);
-    console.timeEnd('SQL_API_POLL');
+    console.timeEnd(`SQL_API_POLL:${callId}`);
   } else {
     const errorJson = (await response.json().catch(() => ({}))) as SnowflakeStatementResponse;
     throw new SnowflakeError(

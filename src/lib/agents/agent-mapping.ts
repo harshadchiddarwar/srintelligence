@@ -188,6 +188,60 @@ export const AGENT_ROUTING_MAP: Record<AgentIntent, AgentRoute> = {
 };
 
 // ---------------------------------------------------------------------------
+// Utility: extract the user's requested number of clusters from a message.
+// Returns the integer value, or 0 if the user did not specify (meaning
+// the clustering algorithm should auto-detect the optimum k).
+// ---------------------------------------------------------------------------
+
+const WORD_NUMBERS: Record<string, number> = {
+  two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12,
+};
+
+export function extractNClusters(message: string): number {
+  const lower = message.toLowerCase();
+
+  // Explicit k= / n= / n_clusters= patterns (highest priority)
+  const kEq = lower.match(/\bn_?clusters?\s*[=:]\s*(\d+)/);
+  if (kEq) return parseInt(kEq[1], 10);
+
+  const nEq = lower.match(/\bk\s*[=:]\s*(\d+)/);
+  if (nEq) return parseInt(nEq[1], 10);
+
+  // "N clusters / segments / groups / partitions / components" — digit before the noun
+  const digitBefore = lower.match(
+    /\b(\d+)\s+(?:cluster|segment|group|partition|class|cohort|component)s?\b/,
+  );
+  if (digitBefore) return parseInt(digitBefore[1], 10);
+
+  // "cluster/segment/split into N" — digit after the verb phrase
+  // Also covers "into N Gaussian components" — number followed by optional adjective then noun
+  const digitAfter = lower.match(
+    /\b(?:cluster|segment|split|divide|group|partition)\s+(?:in(?:to)?|by)\s+(\d+)\b/,
+  );
+  if (digitAfter) return parseInt(digitAfter[1], 10);
+
+  // "into N <optional adjective> components" — catches GMM template phrasing
+  // e.g. "into 6 Gaussian components"
+  const intoComponents = lower.match(
+    /\binto\s+(\d+)\s+(?:\w+\s+)?components?\b/,
+  );
+  if (intoComponents) return parseInt(intoComponents[1], 10);
+
+  // Written-out numbers ("three clusters", "segment into five")
+  for (const [word, num] of Object.entries(WORD_NUMBERS)) {
+    const re = new RegExp(
+      `\\b${word}\\s+(?:cluster|segment|group|partition|class|cohort|component)s?\\b|` +
+      `\\b(?:cluster|segment|split|divide|group|partition)\\s+(?:in(?:to)?|by)\\s+${word}\\b`,
+    );
+    if (re.test(lower)) return num;
+  }
+
+  return 0; // auto-detect
+}
+
+// ---------------------------------------------------------------------------
 // Utility: build the natural-language message to send to a named Cortex Agent
 // ---------------------------------------------------------------------------
 
@@ -208,6 +262,7 @@ export function enrichMessage(
     priorNarrative?: string;
     priorSQL?: string;
     priorData?: Record<string, unknown>;
+    nClusters?: number; // explicit cluster count override for cluster intents
   } = {},
 ): string {
   const parts: string[] = [message];
@@ -239,6 +294,10 @@ export function enrichMessage(
       }
       break;
 
+    // CLUSTER* intents are handled directly by route-dispatcher (Option B):
+    // Cortex Analyst → UDTF SELECT...TABLE()...OVER() → executeSQL() → persist.
+    // SRI_CLUSTERING_AGENT is NOT called for CLUSTER* intents, so no enrichment
+    // instructions are injected here.
     case 'CLUSTER':
     case 'CLUSTER_GM':
     case 'CLUSTER_DBSCAN':
@@ -246,9 +305,6 @@ export function enrichMessage(
     case 'CLUSTER_KMEANS':
     case 'CLUSTER_KMEDOIDS':
     case 'CLUSTER_COMPARE':
-      if (opts.priorData?.['nClusters']) {
-        parts.push(`\n[Requested clusters: ${String(opts.priorData['nClusters'])}]`);
-      }
       break;
 
     case 'CAUSAL_CONTRIBUTION':
