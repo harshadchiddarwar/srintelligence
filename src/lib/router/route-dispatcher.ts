@@ -251,13 +251,16 @@ function buildClusterUDTFSQL(intent: AgentIntent, inputQuery: string, nClusters:
  * These columns are passed by reference to the clustering UDTF:
  *   TABLE(UDTF(src.RECORD_ID, src.FEATURES, n) OVER (PARTITION BY 1))
  */
-function buildClusterInputQuestion(message: string, nClusters: number, priorCohortSQL?: string): string {
+function buildClusterInputQuestion(message: string, nClusters: number, priorUserQuestion?: string): string {
   const nHint = nClusters > 0
     ? `The user wants exactly ${nClusters} cluster${nClusters !== 1 ? 's' : ''}.`
     : 'The number of clusters will be auto-detected.';
 
-  const cohortSection = priorCohortSQL
-    ? `\n\nIMPORTANT — Restrict to prior cohort: The user previously identified a specific set of entities using this SQL query. Wrap it as a CTE named _prior_cohort, then JOIN or filter your RECORD_ID + FEATURES query to only include entities present in that cohort:\n\`\`\`sql\n${priorCohortSQL.slice(0, 3000)}\n\`\`\`\n`
+  // If the user is asking to cluster a cohort identified in a prior turn, include
+  // that prior question as a natural-language filter hint so Cortex Analyst applies
+  // the same population scope (e.g. same drug, same date range, same specialty).
+  const cohortSection = priorUserQuestion
+    ? `\n\n[Context: The user previously analysed the following population — apply the same filters when selecting RECORD_IDs: "${priorUserQuestion.slice(0, 400)}"]\n`
     : '';
 
   return `${message}${cohortSection}
@@ -793,13 +796,21 @@ export class RouteDispatcher {
     );
 
     // ── Step 1: Cortex Analyst → RECORD_ID + FEATURES input query ──────────
-    // If the user identified a cohort in a prior ANALYST turn, pass that SQL
-    // so Cortex Analyst restricts the clustering population to that cohort.
-    const priorCohortSQL = this.context.getLastAnalystSQL();
-    if (priorCohortSQL) {
-      console.log(`[CLUSTER] Prior cohort SQL found (first 200): ${priorCohortSQL.slice(0, 200)}`);
+    // If the user identified a cohort in a prior ANALYST turn, pass that user's
+    // NL question as a population-filter hint. Cortex Analyst is a semantic
+    // text-to-SQL model — it understands NL criteria but cannot consume raw
+    // SQL CTEs, so we pass the original question rather than the generated SQL.
+    const history = this.context.conversationHistory;
+    const lastAnalystIdx = [...history].reverse().findIndex(
+      (m) => m.role === 'assistant' && m.intent === 'ANALYST',
+    );
+    const priorUserQuestion = lastAnalystIdx >= 0
+      ? [...history].reverse().slice(lastAnalystIdx + 1).find((m) => m.role === 'user')?.content
+      : undefined;
+    if (priorUserQuestion) {
+      console.log(`[CLUSTER] Prior user question for cohort: ${priorUserQuestion.slice(0, 150)}`);
     }
-    const analystQuestion = buildClusterInputQuestion(message, nClusters, priorCohortSQL);
+    const analystQuestion = buildClusterInputQuestion(message, nClusters, priorUserQuestion);
 
     // Pass last few conversation turns so Cortex Analyst understands the
     // follow-on context (e.g. "cluster those physicians").
