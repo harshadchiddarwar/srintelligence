@@ -251,12 +251,16 @@ function buildClusterUDTFSQL(intent: AgentIntent, inputQuery: string, nClusters:
  * These columns are passed by reference to the clustering UDTF:
  *   TABLE(UDTF(src.RECORD_ID, src.FEATURES, n) OVER (PARTITION BY 1))
  */
-function buildClusterInputQuestion(message: string, nClusters: number): string {
+function buildClusterInputQuestion(message: string, nClusters: number, priorCohortSQL?: string): string {
   const nHint = nClusters > 0
     ? `The user wants exactly ${nClusters} cluster${nClusters !== 1 ? 's' : ''}.`
     : 'The number of clusters will be auto-detected.';
 
-  return `${message}
+  const cohortSection = priorCohortSQL
+    ? `\n\nIMPORTANT — Restrict to prior cohort: The user previously identified a specific set of entities using this SQL query. Wrap it as a CTE named _prior_cohort, then JOIN or filter your RECORD_ID + FEATURES query to only include entities present in that cohort:\n\`\`\`sql\n${priorCohortSQL.slice(0, 3000)}\n\`\`\`\n`
+    : '';
+
+  return `${message}${cohortSection}
 
 Generate a SELECT query for clustering that returns EXACTLY 2 columns (no others):
   1. RECORD_ID VARCHAR  — the unique entity identifier, cast to VARCHAR
@@ -544,8 +548,15 @@ export class RouteDispatcher {
         };
 
         const lastSQL = this.context.getLastAnalystSQL?.();
+        // Pull the last ANALYST narrative from conversation history to give
+        // downstream agents (FORECAST, CAUSAL, MTREE) cohort context.
+        const lastAnalystNarrative = [...this.context.conversationHistory]
+          .reverse()
+          .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
+          ?.content;
         const enriched = enrichMessage(message, intent, {
           priorSQL: lastSQL ?? undefined,
+          priorNarrative: lastAnalystNarrative,
         });
         const agentMessages = this.buildAgentMessages(enriched);
 
@@ -590,6 +601,12 @@ export class RouteDispatcher {
         error: result.error,
       };
       return;
+    }
+
+    // Store successful result so subsequent turns can access it via context
+    // helpers (getLastAnalystSQL, getLastAnalystData, etc.).
+    if (result.success && result.artifact) {
+      this.context.storeResult(`${intent}_${startMs}`, result);
     }
 
     // -----------------------------------------------------------------------
@@ -776,13 +793,30 @@ export class RouteDispatcher {
     );
 
     // ── Step 1: Cortex Analyst → RECORD_ID + FEATURES input query ──────────
-    const analystQuestion = buildClusterInputQuestion(message, nClusters);
+    // If the user identified a cohort in a prior ANALYST turn, pass that SQL
+    // so Cortex Analyst restricts the clustering population to that cohort.
+    const priorCohortSQL = this.context.getLastAnalystSQL();
+    if (priorCohortSQL) {
+      console.log(`[CLUSTER] Prior cohort SQL found (first 200): ${priorCohortSQL.slice(0, 200)}`);
+    }
+    const analystQuestion = buildClusterInputQuestion(message, nClusters, priorCohortSQL);
+
+    // Pass last few conversation turns so Cortex Analyst understands the
+    // follow-on context (e.g. "cluster those physicians").
+    const clusterHistory = this.context.conversationHistory
+      .slice(-6)
+      .map((m) => ({
+        role: (m.role === 'assistant' ? 'analyst' : 'user') as 'user' | 'analyst',
+        content: m.content,
+      }));
+
     console.time(`5a_CLUSTER_ANALYST:${reqId}`);
     let analystResp: Awaited<ReturnType<typeof callCortexAnalyst>>;
     try {
       analystResp = await callCortexAnalyst({
         question: analystQuestion,
         semanticView: baseInput.semanticView.fullyQualifiedName,
+        conversationHistory: clusterHistory.length > 0 ? clusterHistory : undefined,
         signal,
       });
     } catch (err) {
