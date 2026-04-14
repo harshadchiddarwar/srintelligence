@@ -2103,6 +2103,8 @@ interface PcaScatterProps {
 }
 
 function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance, pc1TopFeatures, pc2TopFeatures, segmentNames, medoidPoints, height = 340 }: PcaScatterProps) {
+  const [hoveredCluster, setHoveredCluster] = useState<number | null>(null);
+
   // Separate noise points from cluster points
   const noisePoints = points.filter((p) => p.isNoise || p.cluster === -1);
   const clusterPoints = points.filter((p) => !p.isNoise && p.cluster !== -1);
@@ -2112,6 +2114,7 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
     if (!grouped[p.cluster]) grouped[p.cluster] = [];
     grouped[p.cluster].push({ ...p, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}` });
   }
+  const clusterIds = Object.keys(grouped).map(Number).sort((a, b) => a - b);
 
   // Bubble mode: every cluster collapses to a single distinct (pc1, pc2) position.
   const isBubbleMode = Object.values(grouped).every((pts) => {
@@ -2127,7 +2130,7 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
   const maxPct = pctValues.length > 0 ? Math.max(...pctValues) : 100;
   const bubbleRadius = (pct: number | undefined) => {
     const p = pct && pct > 0 ? pct : maxPct / 2;
-    return 10 + Math.sqrt(p / maxPct) * 20; // 10 – 30 px
+    return 7 + Math.sqrt(p / maxPct) * 13; // 7 – 20 px
   };
 
   // Build axis labels — prefer dominant feature name when available
@@ -2155,12 +2158,35 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
 
   // Individual point size from probability (0–1) in scatter mode
   const pointSize = (pt: PcaPoint) => {
-    if (pt.probability == null) return 20;
-    // Remap probability 0.5–1.0 → 10–35 px² (r ~3–6px)
-    return 10 + (pt.probability - 0.5) * 2 * 50;
+    if (pt.probability == null) return 1.5;
+    // Remap probability 0.5–1.0 → 1–5 px² (r ~1–2.2px)
+    return 1 + (pt.probability - 0.5) * 2 * 8;
   };
 
   return (
+    <div>
+      {/* External legend — rendered outside recharts so mouse events work reliably */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px", justifyContent: "center", paddingBottom: 8 }}>
+        {noisePoints.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#D3D3D3", flexShrink: 0 }} />
+            <span style={{ fontSize: 11, color: "var(--text-secondary, #444)" }}>Noise / Outlier</span>
+          </div>
+        )}
+        {clusterIds.map((cid) => {
+          const color = getClusterColor(cid);
+          const name = segmentNames[cid] ?? `Cluster ${cid}`;
+          const isDimmed = hoveredCluster !== null && hoveredCluster !== cid;
+          return (
+            <div key={cid} style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", opacity: isDimmed ? 0.35 : 1, transition: "opacity 0.15s" }}
+              onMouseEnter={() => setHoveredCluster(cid)}
+              onMouseLeave={() => setHoveredCluster(null)}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: color, flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "var(--text-secondary, #444)", fontWeight: hoveredCluster === cid ? 600 : 400 }}>{name}</span>
+            </div>
+          );
+        })}
+      </div>
     <ResponsiveContainer width="100%" height={height}>
       {/* Extra bottom margin so legend doesn't collide with X-axis label */}
       {/* left:90 reserves space for the rotated Y-axis title outside the tick numbers */}
@@ -2237,16 +2263,6 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
             );
           }}
         />
-        {/* Legend at top to prevent overlap with X-axis labels at bottom */}
-        <Legend
-          verticalAlign="top"
-          wrapperStyle={{ paddingBottom: 12, fontSize: 11 }}
-          formatter={(value) => {
-            if (value === "__noise__") return "Noise / Outlier";
-            return segmentNames[Number(value)] ?? value;
-          }}
-        />
-
         {/* DBSCAN noise points — gray, low opacity */}
         {noisePoints.length > 0 && (
           <Scatter
@@ -2254,13 +2270,13 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
             name="__noise__"
             data={noisePoints.map((p) => ({ ...p, name: "Noise / Outlier" }))}
             fill="#D3D3D3"
-            opacity={0.4}
+            opacity={hoveredCluster !== null ? 0.1 : 0.4}
             shape={isBubbleMode ? undefined : (props: ScatterShapeProps) => {
               const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
               const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
               const pt = (props as unknown as Record<string, unknown>)["payload"] as PcaPoint | undefined;
               const op = pointOpacity(pt ?? {} as PcaPoint, 0.35);
-              const sz = Math.sqrt(Math.max(pointSize(pt ?? {} as PcaPoint), 5));
+              const sz = Math.sqrt(Math.max(pointSize(pt ?? {} as PcaPoint), 1));
               return <circle cx={cx} cy={cy} r={sz} fill="#D3D3D3" opacity={op} />;
             }}
           />
@@ -2270,13 +2286,14 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
         {Object.entries(grouped).map(([cluster, pts]) => {
           const clusterId = Number(cluster);
           const fill = getClusterColor(clusterId);
+          const isDimmed = hoveredCluster !== null && hoveredCluster !== clusterId;
           return (
             <Scatter
               key={cluster}
               name={cluster}
               data={pts}
-              fill={fill}
-              opacity={isBubbleMode ? 0.85 : 0.65}
+              fill={isDimmed ? "#9ca3af" : fill}
+              opacity={isDimmed ? 0.18 : (isBubbleMode ? 0.85 : 0.65)}
               // Bubble mode: halo ring + solid core sized by segment pct, with label
               shape={isBubbleMode ? (props: ScatterShapeProps) => {
                 const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
@@ -2285,19 +2302,20 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
                 const shortLabel = label.length > 16 ? label.slice(0, 14) + "…" : label;
                 const pctVal = (props as unknown as Record<string, number | undefined>)["pct"];
                 const r = bubbleRadius(pctVal);
+                const activeFill = isDimmed ? "#9ca3af" : fill;
                 return (
                   <g>
                     {/* outer halo */}
-                    <circle cx={cx} cy={cy} r={r * 1.6} fill={fill} opacity={0.12} />
+                    <circle cx={cx} cy={cy} r={r * 1.6} fill={activeFill} opacity={isDimmed ? 0.06 : 0.12} />
                     {/* mid ring */}
-                    <circle cx={cx} cy={cy} r={r * 1.1} fill="none" stroke={fill} strokeWidth={1} opacity={0.3} />
+                    <circle cx={cx} cy={cy} r={r * 1.1} fill="none" stroke={activeFill} strokeWidth={1} opacity={isDimmed ? 0.15 : 0.3} />
                     {/* solid core */}
-                    <circle cx={cx} cy={cy} r={r * 0.55} fill={fill} opacity={0.9} />
+                    <circle cx={cx} cy={cy} r={r * 0.55} fill={activeFill} opacity={isDimmed ? 0.25 : 0.9} />
                     {/* segment label above bubble */}
-                    <text x={cx} y={cy - r * 1.7} textAnchor="middle" fontSize={9} fontWeight={600} fill={fill} style={{ pointerEvents: "none" }}>
+                    <text x={cx} y={cy - r * 1.7} textAnchor="middle" fontSize={9} fontWeight={600} fill={activeFill} style={{ pointerEvents: "none" }}>
                       {shortLabel}
                     </text>
-                    {pctVal != null && pctVal > 0 && (
+                    {pctVal != null && pctVal > 0 && !isDimmed && (
                       <text x={cx} y={cy + 4} textAnchor="middle" fontSize={8} fontWeight={700} fill="#fff" style={{ pointerEvents: "none" }}>
                         {pctVal.toFixed(0)}%
                       </text>
@@ -2310,8 +2328,8 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
                 const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
                 const pt = (props as unknown as Record<string, unknown>)["payload"] as PcaPoint | undefined;
                 const op = pointOpacity(pt ?? {} as PcaPoint, 0.65);
-                const sz = Math.sqrt(Math.max(pt ? pointSize(pt) : 20, 5));
-                return <circle cx={cx} cy={cy} r={sz} fill={fill} opacity={op} />;
+                const sz = Math.sqrt(Math.max(pt ? pointSize(pt) : 1.5, 1));
+                return <circle cx={cx} cy={cy} r={sz} fill={isDimmed ? "#9ca3af" : fill} opacity={isDimmed ? 0.18 : op} />;
               }}
             />
           );
@@ -2320,12 +2338,13 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
         {/* K-Medoids medoid star markers */}
         {medoidPoints && medoidPoints.map((m) => {
           const fill = getClusterColor(m.cluster);
+          const isDimmedMedoid = hoveredCluster !== null && hoveredCluster !== m.cluster;
           return (
             <Scatter
               key={`medoid-${m.cluster}`}
               name={`medoid-${m.cluster}`}
               data={[{ pc1: m.pc1, pc2: m.pc2, cluster: m.cluster }]}
-              fill={fill}
+              fill={isDimmedMedoid ? "#9ca3af" : fill}
               shape={(props: ScatterShapeProps) => {
                 const cx = (props as unknown as Record<string, number>)["cx"] ?? 0;
                 const cy = (props as unknown as Record<string, number>)["cy"] ?? 0;
@@ -2340,10 +2359,10 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
                 return (
                   <polygon
                     points={pts.join(" ")}
-                    fill={fill}
+                    fill={isDimmedMedoid ? "#9ca3af" : fill}
                     stroke="#fff"
                     strokeWidth={1.5}
-                    opacity={0.95}
+                    opacity={isDimmedMedoid ? 0.25 : 0.95}
                   />
                 );
               }}
@@ -2353,11 +2372,12 @@ function PcaScatterChart({ points, pc1Label, pc2Label, pc1Variance, pc2Variance,
         })}
       </ScatterChart>
     </ResponsiveContainer>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// GMM Contour Plot
+// GMM Contour Plot (Gaussian Mixture Model)
 // ---------------------------------------------------------------------------
 
 interface ContourEllipse {
@@ -2421,12 +2441,16 @@ function PcaContourChart({
   segmentNames,
   height = 340,
 }: PcaScatterProps) {
+  const [hoveredCluster, setHoveredCluster] = useState<number | null>(null);
+
   const clusterPoints = points.filter((p) => !p.isNoise && p.cluster !== -1);
   const grouped: Record<number, (PcaPoint & { name: string })[]> = {};
   for (const p of clusterPoints) {
     if (!grouped[p.cluster]) grouped[p.cluster] = [];
     grouped[p.cluster].push({ ...p, name: segmentNames[p.cluster] ?? `Cluster ${p.cluster}` });
   }
+
+  const clusterIds = Object.keys(grouped).map(Number);
 
   const ellipses = useMemo(() => computeClusterEllipses(points), [points]);
 
@@ -2454,7 +2478,9 @@ function PcaContourChart({
     return (
       <g>
         {ellipses.flatMap((e) => {
-          const color = getClusterColor(e.clusterId);
+          const isHovered = hoveredCluster === null || hoveredCluster === e.clusterId;
+          const color = isHovered ? getClusterColor(e.clusterId) : "#9ca3af";
+          const dimOpacity = hoveredCluster !== null && !isHovered;
           const name = segmentNames[e.clusterId] ?? `Cluster ${e.clusterId}`;
           const cx = xScale(e.mu1);
           const cy = yScale(e.mu2);
@@ -2467,19 +2493,21 @@ function PcaContourChart({
               stroke={color}
               strokeWidth={1}
               strokeDasharray="5 3"
-              opacity={0.45}
+              opacity={dimOpacity ? 0.18 : 0.45}
+              style={{ transition: "opacity 0.15s, stroke 0.15s" }}
             />,
             // 1σ filled region
             <path
               key={`ellipse-${e.clusterId}-1s`}
               d={buildEllipsePath(e, 1, xScale, yScale)}
-              fill={`${color}22`}
+              fill={isHovered ? `${getClusterColor(e.clusterId)}22` : "#9ca3af18"}
               stroke={color}
               strokeWidth={1.8}
-              opacity={0.9}
+              opacity={dimOpacity ? 0.2 : 0.9}
+              style={{ transition: "opacity 0.15s, stroke 0.15s, fill 0.15s" }}
             />,
             // Center cross-hair
-            <circle key={`center-${e.clusterId}`} cx={cx} cy={cy} r={5} fill={color} opacity={0.95} />,
+            <circle key={`center-${e.clusterId}`} cx={cx} cy={cy} r={5} fill={color} opacity={dimOpacity ? 0.25 : 0.95} style={{ transition: "opacity 0.15s, fill 0.15s" }} />,
             <text
               key={`label-${e.clusterId}`}
               x={cx + 7}
@@ -2487,7 +2515,8 @@ function PcaContourChart({
               fontSize={9}
               fill={color}
               fontWeight={600}
-              style={{ pointerEvents: "none", userSelect: "none" }}
+              opacity={dimOpacity ? 0.3 : 1}
+              style={{ pointerEvents: "none", userSelect: "none", transition: "opacity 0.15s, fill 0.15s" }}
             >
               {name.length > 18 ? name.slice(0, 17) + "…" : name}
             </text>,
@@ -2498,65 +2527,82 @@ function PcaContourChart({
   };
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <ScatterChart margin={{ top: 20, right: 50, bottom: 55, left: 90 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-        <XAxis
-          type="number"
-          dataKey="pc1"
-          name={xLabel ?? "PC1"}
-          tick={{ fontSize: 10 }}
-          label={xLabel ? { value: xLabel, position: "insideBottom", offset: -30, fontSize: 11, fill: "#555" } : undefined}
-        />
-        <YAxis
-          type="number"
-          dataKey="pc2"
-          name={yLabel ?? "PC2"}
-          tick={{ fontSize: 10 }}
-          label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", offset: 20, fontSize: 11, fill: "#555" } : undefined}
-          width={80}
-        />
-        <Tooltip
-          cursor={false}
-          content={({ active, payload }) => {
-            if (!active || !payload?.length) return null;
-            const d = payload[0]?.payload as PcaPoint & { name: string };
-            const color = getClusterColor(d.cluster);
-            return (
-              <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "#fff", border: "1px solid #e2e8f0" }}>
-                <p className="font-semibold mb-1" style={{ color }}>{d.name}</p>
-                <p style={{ color: "#555" }}>PC1: {d.pc1.toFixed(3)}</p>
-                <p style={{ color: "#555" }}>PC2: {d.pc2.toFixed(3)}</p>
-                {d.probability != null && <p style={{ color: "#555" }}>Probability: {(d.probability * 100).toFixed(1)}%</p>}
-              </div>
-            );
-          }}
-        />
-        <Legend
-          verticalAlign="top"
-          wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
-          formatter={(value: string) => <span style={{ color: "#444" }}>{value}</span>}
-        />
-        {/* Render faint scatter dots as background reference */}
-        {Object.entries(grouped).map(([cluster, pts]) => {
-          const clusterId = parseInt(cluster);
-          const fill = getClusterColor(clusterId);
+    <div>
+      {/* External legend — outside ResponsiveContainer so mouse events are not swallowed by recharts */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px", justifyContent: "center", paddingBottom: 8 }}>
+        {clusterIds.map((clusterId) => {
+          const color = getClusterColor(clusterId);
           const name = segmentNames[clusterId] ?? `Cluster ${clusterId}`;
+          const isActive = hoveredCluster === clusterId;
+          const isDimmed = hoveredCluster !== null && !isActive;
           return (
-            <Scatter
-              key={cluster}
-              name={name}
-              data={pts}
-              fill={fill}
-              opacity={0.18}
-              shape={() => null as unknown as React.ReactElement}
-            />
+            <div
+              key={clusterId}
+              style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", opacity: isDimmed ? 0.35 : 1, transition: "opacity 0.15s" }}
+              onMouseEnter={() => setHoveredCluster(clusterId)}
+              onMouseLeave={() => setHoveredCluster(null)}
+            >
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: color, flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "var(--text-secondary, #444)", fontWeight: isActive ? 600 : 400 }}>{name}</span>
+            </div>
           );
         })}
-        {/* Ellipse contour overlay */}
-        <Customized component={ContourLayer as React.FC} />
-      </ScatterChart>
-    </ResponsiveContainer>
+      </div>
+      <ResponsiveContainer width="100%" height={height}>
+        <ScatterChart margin={{ top: 20, right: 50, bottom: 55, left: 90 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+          <XAxis
+            type="number"
+            dataKey="pc1"
+            name={xLabel ?? "PC1"}
+            tick={{ fontSize: 10 }}
+            label={xLabel ? { value: xLabel, position: "insideBottom", offset: -30, fontSize: 11, fill: "#555" } : undefined}
+          />
+          <YAxis
+            type="number"
+            dataKey="pc2"
+            name={yLabel ?? "PC2"}
+            tick={{ fontSize: 10 }}
+            label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", offset: 20, fontSize: 11, fill: "#555" } : undefined}
+            width={80}
+          />
+          <Tooltip
+            cursor={false}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null;
+              const d = payload[0]?.payload as PcaPoint & { name: string };
+              const color = getClusterColor(d.cluster);
+              return (
+                <div className="rounded-lg px-3 py-2 text-xs shadow-lg" style={{ background: "#fff", border: "1px solid #e2e8f0" }}>
+                  <p className="font-semibold mb-1" style={{ color }}>{d.name}</p>
+                  <p style={{ color: "#555" }}>PC1: {d.pc1.toFixed(3)}</p>
+                  <p style={{ color: "#555" }}>PC2: {d.pc2.toFixed(3)}</p>
+                  {d.probability != null && <p style={{ color: "#555" }}>Probability: {(d.probability * 100).toFixed(1)}%</p>}
+                </div>
+              );
+            }}
+          />
+          {/* Render faint scatter dots as background reference */}
+          {Object.entries(grouped).map(([cluster, pts]) => {
+            const clusterId = parseInt(cluster);
+            const fill = getClusterColor(clusterId);
+            const name = segmentNames[clusterId] ?? `Cluster ${clusterId}`;
+            return (
+              <Scatter
+                key={cluster}
+                name={name}
+                data={pts}
+                fill={fill}
+                opacity={0.18}
+                shape={() => null as unknown as React.ReactElement}
+              />
+            );
+          })}
+          {/* Ellipse contour overlay */}
+          <Customized component={ContourLayer as React.FC} />
+        </ScatterChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -3591,14 +3637,6 @@ export default function SegmentationArtifact({ artifact }: Props) {
             );
           })()}
         </div>
-      )}
-
-      {/* 6. Feature Weights Chart — collapsible, only when final_weights present */}
-      {segData.featureWeighting?.finalWeights && Object.keys(segData.featureWeighting.finalWeights).length > 0 && (
-        <FeatureWeightsCard
-          weights={segData.featureWeighting.finalWeights}
-          method={segData.featureWeighting.method}
-        />
       )}
 
       {/* 7. Z-score Snake Plot */}
