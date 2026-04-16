@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronDown, ChevronUp, Download, Maximize2, X } from 'lucide-react'
 import type { AgentArtifact } from '../../types/agent'
@@ -15,7 +15,6 @@ import {
   Legend,
   ReferenceLine,
   ReferenceArea,
-  ResponsiveContainer,
 } from 'recharts'
 
 // ---------------------------------------------------------------------------
@@ -354,10 +353,11 @@ export function parseForecastNarrative(text: string): ForecastData {
           /(?:The\s+(?:model|forecast)\s+(?:projects?|shows?|predicts?|indicates?)[^.]{15,}\.)/
         )?.[0]?.trim()
 
-      // Cluster-specific notes (look for #### Notes or #### Caveats sub-heading)
+      // Cluster-specific notes (look for #### Notes / Caveats / Model Notes sub-heading,
+      // or a bold **Notes:** / **Model Notes:** inline heading)
       const clusterNotes = extractSectionBullets(
         sectionText,
-        /#{1,4}\s*(?:Model\s+)?(?:Notes|Caveats|Observations)/i,
+        /(?:#{1,4}\s*|^\*{1,2})(?:Model\s+)?(?:Notes?|Caveats?|Observations?|Key\s+Observations?)\b/im,
       )
 
       const metrics: ForecastMetrics = {
@@ -391,7 +391,7 @@ export function parseForecastNarrative(text: string): ForecastData {
 
       const commonNotes = extractSectionBullets(
         text,
-        /^#{1,3}\s*(?:Common\s+)?Model\s+Notes?\b/im,
+        /^#{1,3}\s*(?:Common\s+(?:Model\s+)?Notes?|Model\s+Notes?|Notes?\s+(?:for\s+All|Common))\b/im,
       )
 
       const overallSummaryM =
@@ -611,9 +611,23 @@ function MetricCard({
   )
 }
 
-/** Render inline markdown: **bold** and _italic_. Strips orphaned unmatched ** markers. */
+/** Strip HTML tags and decode common HTML entities from a string */
+function stripHtml(text: string): string {
+  return text
+    .replace(/<br\s*\/?>/gi, ' ')        // <br> → space
+    .replace(/<[^>]+>/g, '')             // strip all other tags
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+}
+
+/** Render inline markdown: **bold** and _italic_. Strips HTML and orphaned markers. */
 function renderInlineMarkdown(text: string): React.ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*|_[^_]+_)/g)
+  const clean = stripHtml(text)
+  const parts = clean.split(/(\*\*[^*]+\*\*|_[^_]+_)/g)
   return parts.map((part, i) => {
     if (part.startsWith('**') && part.endsWith('**')) {
       return <strong key={i} className="font-semibold text-gray-900">{part.slice(2, -2)}</strong>
@@ -752,16 +766,18 @@ function CustomTooltip({
 // Multi-cluster line chart (no CI)
 // ---------------------------------------------------------------------------
 
-// Fixed palette — one colour per cluster (up to 8)
+// Fixed palette — matches SegmentationArtifact Tableau-10 accent colours (up to 10)
 const CLUSTER_COLORS = [
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#06b6d4', // cyan
-  '#f97316', // orange
-  '#84cc16', // lime
+  '#4E79A7', // blue
+  '#F28E2B', // orange
+  '#59A14F', // green
+  '#E15759', // red
+  '#B07AA1', // purple
+  '#9C755F', // brown
+  '#FF9DA7', // pink
+  '#BAB0AC', // gray
+  '#76B7B2', // teal
+  '#EDC948', // gold
 ]
 
 // ---------------------------------------------------------------------------
@@ -778,7 +794,21 @@ function MultiClusterReport({
   overallSummary?: string
 }) {
   const chartRef = useRef<HTMLDivElement>(null)
+  const chartCardRef = useRef<HTMLDivElement>(null)
   const [chartFullscreen, setChartFullscreen] = useState(false)
+  const [containerWidth, setContainerWidth] = useState(0)
+
+  // Measure the card width so the chart can fill it exactly
+  useEffect(() => {
+    const el = chartCardRef.current
+    if (!el) return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width
+      if (w) setContainerWidth(Math.floor(w))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   const fmt = (v: number | undefined) =>
     v != null ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'
@@ -814,7 +844,13 @@ function MultiClusterReport({
 
   const CHART_HEIGHT   = 300
   const CHART_MIN_W    = 700
-  const scrollWidth    = Math.max(CHART_MIN_W, allDates.length * 16)
+  // Use measured container width (minus 32px for p-4 padding on both sides) so the
+  // chart fills the card; fall back to CHART_MIN_W until the ResizeObserver fires.
+  const scrollWidth    = Math.max(
+    CHART_MIN_W,
+    allDates.length * 16,
+    containerWidth > 0 ? containerWidth - 32 : 0,
+  )
 
   // ── Forecast table: all dates × clusters ─────────────────────────────────
   const tableRows = allDates.map(date => {
@@ -852,16 +888,16 @@ function MultiClusterReport({
   // ── Chart body (reused in normal + fullscreen) ────────────────────────────
   const renderChart = (height: number, width: number) => (
     <div ref={chartRef} style={{ overflowX: 'auto' }}>
-      <div style={{ minWidth: width, height }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 8, right: 24, bottom: 40, left: 0 }}>
+      <div style={{ width, height }}>
+        <ComposedChart width={width} height={height} data={chartData} margin={{ top: 8, right: 24, bottom: 60, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis
               dataKey="date"
               tick={{ fontSize: 10, fill: '#6b7280' }}
-              angle={-35}
+              angle={-45}
               textAnchor="end"
               interval="preserveStartEnd"
+              height={56}
             />
             <YAxis
               tick={{ fontSize: 10, fill: '#6b7280' }}
@@ -935,7 +971,6 @@ function MultiClusterReport({
               )
             })}
           </ComposedChart>
-        </ResponsiveContainer>
       </div>
     </div>
   )
@@ -954,6 +989,14 @@ function MultiClusterReport({
         downloadCSV(hdrs, rows as (string | number | undefined)[][], 'actuals_vs_forecast.csv')
       }}
       label="CSV"
+    />
+  )
+
+  const pptxChartAction = (
+    <DownloadButton
+      onClick={() => exportChartToPptx(chartRef, 'Actuals vs Forecast')}
+      label="PPTX"
+      title="Download chart as PowerPoint"
     />
   )
 
@@ -1024,11 +1067,12 @@ function MultiClusterReport({
       {/* ── 2. Actuals vs Forecast Chart ──────────────────────────────────── */}
       {allDates.length > 0 && (
         <>
-          <div className="rounded-lg border border-gray-200 bg-white p-4">
+          <div ref={chartCardRef} className="rounded-lg border border-gray-200 bg-white p-4">
             <div className="flex items-center justify-between mb-3">
               <SectionTitle>Actuals vs Forecast</SectionTitle>
               <div className="flex items-center gap-1.5 -mt-3">
                 {csvChartAction}
+                {pptxChartAction}
                 <button
                   onClick={() => setChartFullscreen(true)}
                   title="Full screen"
@@ -1045,7 +1089,7 @@ function MultiClusterReport({
             <FullscreenOverlay
               title="Actuals vs Forecast"
               onClose={() => setChartFullscreen(false)}
-              actions={csvChartAction}
+              actions={<>{csvChartAction}{pptxChartAction}</>}
             >
               {renderChart(
                 Math.max(400, window.innerHeight - 160),
@@ -1105,16 +1149,16 @@ function MultiClusterReport({
           <table className="min-w-full text-xs">
             <thead className="sticky top-0 z-10">
               <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Week</th>
+                <th className="px-3 py-2 text-center font-semibold text-gray-600">Week</th>
                 {clusters.map((c, i) => {
                   const name  = c.clusterName.replace(/^###\s*/, '')
                   const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
                   return (
                     <React.Fragment key={i}>
-                      <th className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color }}>
+                      <th className="px-3 py-2 text-center font-semibold" style={{ color }}>
                         {name} Actuals
                       </th>
-                      <th className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color }}>
+                      <th className="px-3 py-2 text-center font-semibold" style={{ color }}>
                         {name} Predicted
                       </th>
                     </React.Fragment>
@@ -1139,13 +1183,13 @@ function MultiClusterReport({
                       </tr>
                     )}
                     <tr className={isFc ? 'bg-teal-50/30' : rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{row.date as string}</td>
+                      <td className="px-3 py-1.5 text-center text-gray-700">{row.date as string}</td>
                       {clusters.map((_, i) => (
                         <React.Fragment key={i}>
-                          <td className="px-3 py-1.5 text-right text-gray-700">
+                          <td className="px-3 py-1.5 text-center text-gray-700">
                             {fmt(row[`c${i}_act`] as number | undefined)}
                           </td>
-                          <td className="px-3 py-1.5 text-right font-medium text-gray-800">
+                          <td className="px-3 py-1.5 text-center font-medium text-gray-800">
                             {fmt(row[`c${i}_pred`] as number | undefined)}
                           </td>
                         </React.Fragment>
@@ -1414,7 +1458,7 @@ export default function ForecastArtifact({ artifact }: Props) {
             />
             <DownloadButton
               onClick={() => exportChartToPptx(chartRef, 'Actuals vs Forecast')}
-              label="PPTx"
+              label="PPTX"
               title="Download chart as PowerPoint"
             />
           </>
@@ -1422,9 +1466,8 @@ export default function ForecastArtifact({ artifact }: Props) {
 
         const chartBody = (height: number, scrollWidth: number) => (
           <div ref={chartRef} className="w-full overflow-x-auto">
-            <div style={{ minWidth: scrollWidth, height }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={chartData} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+            <div style={{ width: scrollWidth, height }}>
+              <ComposedChart width={scrollWidth} height={height} data={chartData} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                   <XAxis
                     dataKey="date"
@@ -1473,7 +1516,6 @@ export default function ForecastArtifact({ artifact }: Props) {
                   <Line type="monotone" dataKey="Actuals" stroke="#6366f1" strokeWidth={2} dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="Forecast" stroke="#0d9488" strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls={false} />
                 </ComposedChart>
-              </ResponsiveContainer>
             </div>
           </div>
         )

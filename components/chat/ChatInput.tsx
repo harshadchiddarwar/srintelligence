@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, KeyboardEvent } from "react";
+import React, { useState, useRef, useEffect, KeyboardEvent } from "react";
 import { ArrowUp, ChevronDown, ChevronRight, Database, StopCircle, Star, TrendingUp, Layers, GitFork, BarChart2, GitPullRequestArrow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -47,11 +47,26 @@ const AGENT_OPTIONS: AgentOption[] = [
     description: "Time-series demand forecasting",
     tag: "@Forecast",
     models: [
-      { id: "auto",         label: "Auto (best-fit)",  description: "Let SRI pick the optimal model",    tag: "@Forecast"              },
-      { id: "prophet",      label: "Prophet",           description: "Trend + seasonality decomposition", tag: "@Forecast/Prophet"      },
-      { id: "sarima",       label: "SARIMA",            description: "Statistical time-series model",     tag: "@Forecast/SARIMA"       },
-      { id: "holt-winters", label: "Holt-Winters",      description: "Exponential smoothing",             tag: "@Forecast/Holt-Winters" },
-      { id: "xgboost",      label: "XGBoost",           description: "Gradient boosted trees",            tag: "@Forecast/XGBoost"      },
+      {
+        id: "auto",         label: "Auto (best-fit)",  description: "Let SRI pick the optimal model",    tag: "@Forecast",
+        template: "Forecast [metric / what to predict] at [weekly|monthly] granularity using [N weeks|N months] of history for [N periods] ahead",
+      },
+      {
+        id: "prophet",      label: "Prophet",           description: "Trend + seasonality decomposition", tag: "@Forecast/Prophet",
+        template: "Forecast [metric / what to predict] using Prophet at [weekly|monthly] granularity using [N weeks|N months] of history for [N periods] ahead",
+      },
+      {
+        id: "sarima",       label: "SARIMA",            description: "Statistical time-series model",     tag: "@Forecast/SARIMA",
+        template: "Forecast [metric / what to predict] using SARIMA at [weekly|monthly] granularity using [N weeks|N months] of history for [N periods] ahead",
+      },
+      {
+        id: "holt-winters", label: "Holt-Winters",      description: "Exponential smoothing",             tag: "@Forecast/Holt-Winters",
+        template: "Forecast [metric / what to predict] using Holt-Winters at [weekly|monthly] granularity using [N weeks|N months] of history for [N periods] ahead",
+      },
+      {
+        id: "xgboost",      label: "XGBoost",           description: "Gradient boosted trees",            tag: "@Forecast/XGBoost",
+        template: "Forecast [metric / what to predict] using XGBoost at [weekly|monthly] granularity using [N weeks|N months] of history for [N periods] ahead using features: [feature1, feature2, ...]",
+      },
     ],
   },
   {
@@ -190,6 +205,7 @@ export default function ChatInput({
 
   // Feature column picker
   const [viewColumns, setViewColumns] = useState<string[]>([]);
+  const [tableColumns, setTableColumns] = useState<{ table: string; columns: string[] }[]>([]);
   const [featurePopup, setFeaturePopup] = useState(false);
   const [featureQuery, setFeatureQuery] = useState("");
   const [featureIdx, setFeatureIdx] = useState(0);
@@ -232,10 +248,11 @@ export default function ChatInput({
     if (!selectedViewId) return;
     fetch(`/api/semantic-views/${selectedViewId}/columns`)
       .then((r) => r.json())
-      .then((data: { columns?: string[] }) => {
+      .then((data: { columns?: string[]; tableColumns?: { table: string; columns: string[] }[] }) => {
         setViewColumns(data.columns ?? []);
+        setTableColumns(data.tableColumns ?? []);
       })
-      .catch(() => setViewColumns([]));
+      .catch(() => { setViewColumns([]); setTableColumns([]); });
   }, [selectedViewId]);
 
   useEffect(() => {
@@ -264,7 +281,7 @@ export default function ChatInput({
   // Scroll selected feature into view
   useEffect(() => {
     if (!featurePopup || !featureListRef.current) return;
-    const item = featureListRef.current.children[featureIdx] as HTMLElement | undefined;
+    const item = featureListRef.current.querySelector(`[data-feature-idx="${featureIdx}"]`) as HTMLElement | null;
     item?.scrollIntoView({ block: "nearest" });
   }, [featureIdx, featurePopup]);
 
@@ -279,9 +296,21 @@ export default function ChatInput({
     setFeaturePopup(false);
   };
 
-  const filteredColumns = featureQuery
-    ? viewColumns.filter((c) => c.toLowerCase().includes(featureQuery.toLowerCase()))
-    : viewColumns;
+  // Build a flat list of {col, table} items for the feature picker, filtered by featureQuery
+  // Groups are preserved from tableColumns; fall back to flat viewColumns if tableColumns is empty.
+  const filteredColumnItems: { col: string; table: string }[] = featureQuery
+    ? viewColumns
+        .filter((c) => c.toLowerCase().includes(featureQuery.toLowerCase()))
+        .map((col) => {
+          const grp = tableColumns.find((t) => t.columns.includes(col));
+          return { col, table: grp?.table ?? '' };
+        })
+    : tableColumns.length > 0
+      ? tableColumns.flatMap((t) => t.columns.map((col) => ({ col, table: t.table })))
+      : viewColumns.map((col) => ({ col, table: '' }));
+
+  // Legacy flat list (used by scroll-into-view logic)
+  const filteredColumns = filteredColumnItems.map((x) => x.col);
 
   /** Insert a column name, replacing the currently selected [feature...] bracket */
   const insertColumn = (col: string) => {
@@ -694,13 +723,13 @@ export default function ChatInput({
       {featurePopup && viewColumns.length > 0 && (
         <div
           className="absolute bottom-full left-0 mb-1 z-50 rounded-xl shadow-xl overflow-hidden"
-          style={{ background: "#ffffff", border: "1px solid var(--border)", minWidth: 260, maxWidth: 340 }}
+          style={{ background: "#ffffff", border: "1px solid var(--border)", minWidth: 280, maxWidth: 380 }}
         >
           <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
             <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
               Available columns
               <span className="ml-1.5 font-normal" style={{ color: "var(--text-muted)" }}>
-                ({filteredColumns.length}{featureQuery ? ` of ${viewColumns.length}` : ""})
+                ({filteredColumnItems.length}{featureQuery ? ` of ${viewColumns.length}` : ""})
               </span>
             </p>
             <p style={{ fontSize: "10px", color: "var(--text-muted)" }}>
@@ -709,34 +738,68 @@ export default function ChatInput({
           </div>
           <div
             ref={featureListRef}
-            style={{ maxHeight: 220, overflowY: "auto" }}
+            style={{ maxHeight: 260, overflowY: "auto" }}
           >
-            {filteredColumns.length === 0 ? (
+            {filteredColumnItems.length === 0 ? (
               <p className="px-3 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
                 No columns match &ldquo;{featureQuery}&rdquo;
               </p>
-            ) : (
-              filteredColumns.map((col, i) => (
-                <button
-                  key={col}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors"
-                  style={{
-                    background: i === featureIdx ? "var(--accent-dim)" : "transparent",
-                    borderBottom: i < filteredColumns.length - 1 ? "1px solid var(--border)" : "none",
-                  }}
-                  onMouseEnter={() => setFeatureIdx(i)}
-                  onClick={() => insertColumn(col)}
-                >
-                  <span
-                    className="font-mono text-xs px-1.5 py-0.5 rounded"
-                    style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)", fontSize: "10px" }}
+            ) : (() => {
+              // Render with table group headers (when not filtering by query)
+              const items: React.ReactNode[] = [];
+              let lastTable = "";
+              filteredColumnItems.forEach((item, i) => {
+                // Show table group header whenever the table changes (skip in search mode)
+                if (!featureQuery && item.table && item.table !== lastTable) {
+                  lastTable = item.table;
+                  items.push(
+                    <div
+                      key={`grp-${item.table}`}
+                      className="px-3 py-1.5 flex items-center gap-1.5"
+                      style={{
+                        background: "var(--bg-secondary)",
+                        borderBottom: "1px solid var(--border)",
+                        position: "sticky",
+                        top: 0,
+                        zIndex: 1,
+                      }}
+                    >
+                      <Database size={10} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                      <span
+                        className="font-mono font-semibold uppercase tracking-wide"
+                        style={{ fontSize: "9px", color: "var(--text-muted)" }}
+                      >
+                        {item.table}
+                      </span>
+                    </div>
+                  );
+                }
+                items.push(
+                  <button
+                    key={`${item.table}-${item.col}`}
+                    data-feature-idx={i}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors"
+                    style={{
+                      background: i === featureIdx ? "var(--accent-dim)" : "transparent",
+                      borderBottom: i < filteredColumnItems.length - 1 ? "1px solid var(--border)" : "none",
+                    }}
+                    onMouseEnter={() => setFeatureIdx(i)}
+                    onClick={() => insertColumn(item.col)}
                   >
-                    col
-                  </span>
-                  <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>{col}</span>
-                </button>
-              ))
-            )}
+                    <span
+                      className="font-mono text-xs px-1.5 py-0.5 rounded flex-shrink-0"
+                      style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)", fontSize: "10px" }}
+                    >
+                      col
+                    </span>
+                    <span className="text-xs font-medium truncate" style={{ color: "var(--text-primary)" }}>
+                      {item.col}
+                    </span>
+                  </button>
+                );
+              });
+              return items;
+            })()}
           </div>
         </div>
       )}

@@ -28,16 +28,33 @@ export async function GET(
 
     const { db, schema } = parsed;
     const sql = `
-      SELECT DISTINCT COLUMN_NAME, DATA_TYPE
+      SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
       FROM ${db}.INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = '${schema}'
-      ORDER BY COLUMN_NAME ASC
+      ORDER BY TABLE_NAME ASC, COLUMN_NAME ASC
     `;
 
     const result = await executeSQL(sql);
-    const columns = result.rows.map((r) => String(r['COLUMN_NAME'] ?? r['column_name'] ?? ''));
 
-    return Response.json({ columns });
+    // Group columns by table name
+    const tableMap = new Map<string, string[]>();
+    for (const r of result.rows) {
+      const table = String(r['TABLE_NAME'] ?? r['table_name'] ?? 'UNKNOWN');
+      const col = String(r['COLUMN_NAME'] ?? r['column_name'] ?? '');
+      if (!col) continue;
+      if (!tableMap.has(table)) tableMap.set(table, []);
+      tableMap.get(table)!.push(col);
+    }
+
+    const tableColumns = Array.from(tableMap.entries()).map(([table, columns]) => ({
+      table,
+      columns,
+    }));
+
+    // Also return flat list for backward compat
+    const columns = tableColumns.flatMap((t) => t.columns);
+
+    return Response.json({ columns, tableColumns });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: message, columns: [] }, { status: 500 });

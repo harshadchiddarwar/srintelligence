@@ -85,8 +85,7 @@ export class LineageTracker {
       INSERT INTO CORTEX_TESTING.PUBLIC.DATA_LINEAGE (
         lineage_id, session_id, user_id, semantic_view_id, semantic_view_name,
         user_question, intent, agent_name, parent_lineage_id, source_sql,
-        executed_sql, row_count, execution_time_ms, cache_status, credits_consumed,
-        created_at
+        executed_sql, row_count, execution_time_ms, cache_status, credits_consumed
       ) VALUES (
         '${lineageId}',
         '${params.sessionId}',
@@ -102,8 +101,7 @@ export class LineageTracker {
         ${params.rowCount ?? 'NULL'},
         ${params.executionTimeMs},
         '${params.cacheStatus}',
-        ${params.creditsConsumed ?? 'NULL'},
-        CURRENT_TIMESTAMP()
+        ${params.creditsConsumed ?? 'NULL'}
       )
     `;
 

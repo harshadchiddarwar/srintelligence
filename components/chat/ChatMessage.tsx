@@ -158,7 +158,7 @@ function UserBubble({
       {/* Bubble — normal or edit mode */}
       {editing ? (
         <div
-          className="w-full max-w-[75%] rounded-2xl rounded-tr-md overflow-hidden"
+          className="w-full max-w-[45%] rounded-2xl rounded-tr-md overflow-hidden"
           style={{
             border: "1.5px solid var(--accent)",
             background: "var(--accent-dim)",
@@ -199,7 +199,7 @@ function UserBubble({
         </div>
       ) : (
         <div
-          className="max-w-[75%] px-4 py-2.5 rounded-2xl rounded-tr-md text-sm leading-relaxed"
+          className="max-w-[45%] px-4 py-2.5 rounded-2xl rounded-tr-md text-sm leading-relaxed"
           style={{
             background: "var(--accent-dim)",
             color: "var(--text-primary)",
