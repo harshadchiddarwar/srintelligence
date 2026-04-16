@@ -7,6 +7,7 @@ import ForecastArtifact from './ForecastArtifact'
 import ForecastCompareArtifact from './ForecastCompareArtifact'
 import DecisionTreeArtifact from './DecisionTreeArtifact'
 import WaterfallArtifact from './WaterfallArtifact'
+import MTreeArtifact from './MTreeArtifact'
 import ClusterProfileArtifact from './ClusterProfileArtifact'
 import CausalResultArtifact from './CausalResultArtifact'
 import ClusterCompareArtifact from './ClusterCompareArtifact'
@@ -112,7 +113,7 @@ export default function ArtifactRenderer({ artifact }: Props) {
     case 'comparison':
       return <ForecastCompareArtifact artifact={artifact} />
     case 'tree':
-      return <DecisionTreeArtifact artifact={artifact} />
+      return <MTreeArtifact artifact={artifact} />
     case 'waterfall':
       return <WaterfallArtifact artifact={artifact} />
     case 'cluster_profile':

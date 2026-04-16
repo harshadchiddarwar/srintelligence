@@ -242,6 +242,8 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const isForecast = /^FORECAST_/.test(resp.intent);
   // Detect clustering intents — use SegmentationArtifact instead of plain markdown
   const isCluster = /^CLUSTER/.test(resp.intent);
+  // Detect mTree intent — MTreeArtifact handles all rendering; suppress raw narrative
+  const isMTree = resp.intent === 'MTREE';
 
   let tableData  = (!isForecast && !isCluster && analystArtifact) ? artifactToTableData(analystArtifact)
                  : (!isForecast && !isCluster && firstArtifact)   ? artifactToTableData(firstArtifact)
@@ -356,7 +358,7 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     CLUSTER_DBSCAN:         "SRI Clustering · DBSCAN",
     CLUSTER_HIERARCHICAL:   "SRI Clustering · Hierarchical",
     CLUSTER_COMPARE:        "SRI Clustering Comparison",
-    MTREE:                  "SRI mTree™ Analytics",
+    MTREE:                  "SRI Meta Tree Analytics",
     CAUSAL:                 "SRI Causal Inference",
     PIPELINE:               "SRI Multi-Agent Pipeline",
     UNKNOWN:                "SRI Analytics Engine",
@@ -367,7 +369,7 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     role: "agent",
     // Suppress raw narrative only when the artifact component has structured data to render.
     // If forecast parsing found no rows (text-only response), show the narrative as markdown.
-    content: (isCluster || (isForecast && forecastData != null)) ? "" : (resp.narrative || "Analysis complete."),
+    content: (isCluster || isMTree || (isForecast && forecastData != null)) ? "" : (resp.narrative || "Analysis complete."),
     agentActivity: {
       masterAgent: "SRIntelligence™ Master Agent",
       routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",
@@ -542,7 +544,7 @@ export default function ThreadPage() {
         CLUSTER_GMM:       "Clustering · GMM",
         CLUSTER_KMEANS:    "Clustering · K-Means",
         CLUSTER_AUTO:      "Clustering · Auto",
-        MTREE:             "mTree™",
+        MTREE:             "Meta Tree",
         CAUSAL:            "Causal Inference",
         PIPELINE:          "Multi-Agent Pipeline",
       };
