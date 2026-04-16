@@ -311,18 +311,20 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
       console.log('[FORECAST_CLIENT] using artifact.data directly, keys=', Object.keys(artifactData));
     } else {
       const parsed = parseForecastNarrative(resp.narrative ?? '') as Record<string, unknown>;
-      const hasForecastRows = Array.isArray(parsed['forecast']) && (parsed['forecast'] as unknown[]).length > 0;
+      const hasForecastRows  = Array.isArray(parsed['forecast'])  && (parsed['forecast']  as unknown[]).length > 0;
       const hasValidationRows = Array.isArray(parsed['validation']) && (parsed['validation'] as unknown[]).length > 0;
-      // Only use parsed data if it contains actual forecast or validation rows.
-      // If the agent returned text-only (no parseable tables), leave forecastData
-      // undefined so the message falls through to plain markdown rendering instead
-      // of showing an empty ForecastArtifact card.
-      forecastData = (hasForecastRows || hasValidationRows) ? parsed : undefined;
+      // Multi-cluster results return { clusters: [...] } with no top-level forecast/validation arrays.
+      const hasClusterData   = Array.isArray(parsed['clusters'])  && (parsed['clusters']  as unknown[]).length >= 2;
+      // Only use parsed data if it contains structured data (forecast rows, validation rows,
+      // or per-cluster sections). If nothing was parseable, fall through to markdown rendering.
+      forecastData = (hasForecastRows || hasValidationRows || hasClusterData) ? parsed : undefined;
       console.log('[FORECAST_CLIENT] parsed from narrative:', {
         hasForecast:    hasForecastRows,
         forecastLen:    hasForecastRows ? (parsed['forecast'] as unknown[]).length : 0,
         hasValidation:  hasValidationRows,
         validationLen:  hasValidationRows ? (parsed['validation'] as unknown[]).length : 0,
+        hasClusters:    hasClusterData,
+        clusterCount:   hasClusterData ? (parsed['clusters'] as unknown[]).length : 0,
         metrics:        parsed['metrics'],
         usedParsed:     forecastData != null,
       });
