@@ -305,20 +305,26 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     console.log('[FORECAST_CLIENT] intent=', resp.intent);
     console.log('[FORECAST_CLIENT] artifact.data=', artifactData);
     console.log('[FORECAST_CLIENT] narrative length=', resp.narrative?.length ?? 0);
-    console.log('[FORECAST_CLIENT] narrative preview=', resp.narrative?.slice(0, 300));
+    console.log('[FORECAST_CLIENT] narrative full=', resp.narrative);
     if (artifactData && Object.keys(artifactData).length > 0) {
       forecastData = artifactData;
       console.log('[FORECAST_CLIENT] using artifact.data directly, keys=', Object.keys(artifactData));
     } else {
-      forecastData = parseForecastNarrative(resp.narrative ?? '') as Record<string, unknown>;
+      const parsed = parseForecastNarrative(resp.narrative ?? '') as Record<string, unknown>;
+      const hasForecastRows = Array.isArray(parsed['forecast']) && (parsed['forecast'] as unknown[]).length > 0;
+      const hasValidationRows = Array.isArray(parsed['validation']) && (parsed['validation'] as unknown[]).length > 0;
+      // Only use parsed data if it contains actual forecast or validation rows.
+      // If the agent returned text-only (no parseable tables), leave forecastData
+      // undefined so the message falls through to plain markdown rendering instead
+      // of showing an empty ForecastArtifact card.
+      forecastData = (hasForecastRows || hasValidationRows) ? parsed : undefined;
       console.log('[FORECAST_CLIENT] parsed from narrative:', {
-        hasForecast:    Array.isArray((forecastData as Record<string,unknown>)['forecast']),
-        forecastLen:    ((forecastData as Record<string,unknown>)['forecast'] as unknown[])?.length,
-        hasValidation:  Array.isArray((forecastData as Record<string,unknown>)['validation']),
-        validationLen:  ((forecastData as Record<string,unknown>)['validation'] as unknown[])?.length,
-        metrics:        (forecastData as Record<string,unknown>)['metrics'],
-        hasInsights:    Array.isArray((forecastData as Record<string,unknown>)['insights']),
-        hasModelNotes:  Array.isArray((forecastData as Record<string,unknown>)['modelNotes']),
+        hasForecast:    hasForecastRows,
+        forecastLen:    hasForecastRows ? (parsed['forecast'] as unknown[]).length : 0,
+        hasValidation:  hasValidationRows,
+        validationLen:  hasValidationRows ? (parsed['validation'] as unknown[]).length : 0,
+        metrics:        parsed['metrics'],
+        usedParsed:     forecastData != null,
       });
     }
   }
@@ -357,8 +363,9 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const msg: ChatMessage = {
     id,
     role: "agent",
-    // For forecast / cluster messages suppress the raw narrative — the artifact component renders it
-    content: (isForecast || isCluster) ? "" : (resp.narrative || "Analysis complete."),
+    // Suppress raw narrative only when the artifact component has structured data to render.
+    // If forecast parsing found no rows (text-only response), show the narrative as markdown.
+    content: (isCluster || (isForecast && forecastData != null)) ? "" : (resp.narrative || "Analysis complete."),
     agentActivity: {
       masterAgent: "SRIntelligence™ Master Agent",
       routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",

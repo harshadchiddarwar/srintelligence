@@ -86,7 +86,7 @@ function buildAgentResult(
   if (intent.startsWith('FORECAST')) {
     console.log(`[FORECAST_LOG] intent=${intent} agent=${agentRef}`);
     console.log(`[FORECAST_LOG] text length=${text.length} chars`);
-    console.log(`[FORECAST_LOG] text preview (first 300): ${text.slice(0, 300)}`);
+    console.log(`[FORECAST_LOG] FULL TEXT:\n${text}`);
     console.log(`[FORECAST_LOG] data type=${typeof data} isNull=${data == null}`);
     if (data != null && typeof data === 'object') {
       console.log(`[FORECAST_LOG] data keys=${JSON.stringify(Object.keys(data as object))}`);
