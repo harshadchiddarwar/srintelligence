@@ -277,11 +277,21 @@ export function enrichMessage(
     };
     /**
      * Per-cluster summary (label + record count) fetched from CLUSTERING_RESULTS.
-     * Used to add cluster size context to the forecast instruction without passing
-     * all record IDs (which would exceed the 90K-token Cortex Agent limit).
-     * The actual filtering is done via a verbatim CTE in the enriched message.
      */
     clusterSummary?: Record<number, { label: string; count: number }>;
+    /**
+     * Per-cluster metric thresholds computed server-side by joining the prior cohort
+     * SQL with CLUSTERING_RESULTS.  When present, the forecast instruction uses plain
+     * "metricCol BETWEEN minVal AND maxVal" filters that Cortex Analyst CAN apply
+     * (no reference to CLUSTERING_RESULTS, which is outside the semantic model).
+     */
+    clusterThresholds?: Record<number, {
+      label: string;
+      count: number;
+      metricCol: string;
+      minVal: number;
+      maxVal: number;
+    }>;
   } = {},
 ): string {
   const parts: string[] = [message];
@@ -349,42 +359,49 @@ export function enrichMessage(
       }
 
       // ── Per-cluster forecast instruction ──────────────────────────────────
-      // Instructs the forecast agent to produce a separate forecast per cluster.
-      // We reference CLUSTERING_RESULTS via a verbatim CTE hint so the agent's
-      // SQL can join to it — this avoids embedding thousands of record IDs in
-      // the message (which would exceed the 90K-token Cortex Agent limit).
-      if (opts.clusterInfo) {
-        const { nClusters, recordIdCol, algorithm } = opts.clusterInfo;
-        const joinCond = recordIdCol
-          ? `CAST(${recordIdCol} AS VARCHAR) = ca.RECORD_ID`
-          : `<entity_id_column>::VARCHAR = ca.RECORD_ID`;
+      // Strategy A (preferred): Use server-computed metric thresholds so the
+      // agent can filter via plain SQL (BETWEEN X AND Y) — no CLUSTERING_RESULTS
+      // reference needed, which Cortex Analyst cannot resolve.
+      // Strategy B (fallback): Surface cluster context only; agent will produce
+      // a single aggregate forecast with a note about the clusters.
+      if (opts.clusterThresholds && Object.keys(opts.clusterThresholds).length >= 2) {
+        const { clusterThresholds } = opts;
+        const algorithm = opts.clusterInfo?.algorithm ?? 'clustering';
+        const nClusters = Object.keys(clusterThresholds).length;
 
-        // Build cluster labels/counts line (if summary available)
+        const clusterLines = Object.entries(clusterThresholds)
+          .sort(([a], [b]) => Number(a) - Number(b))
+          .map(([cidStr, { label, count, metricCol, minVal, maxVal }]) =>
+            `  Cluster ${cidStr} — ${label} (${count} records):\n` +
+            `    SQL filter: ${metricCol} BETWEEN ${Math.floor(minVal)} AND ${Math.ceil(maxVal)}`,
+          )
+          .join('\n');
+
+        parts.push(
+          `\n\n[CLUSTER FORECAST INSTRUCTION — REQUIRED:\n` +
+          `The cohort was segmented into ${nClusters} groups via ${algorithm} clustering.\n` +
+          `Use the metric filters below to split the cohort — do NOT reference CLUSTERING_RESULTS:\n\n` +
+          `${clusterLines}\n\n` +
+          `Apply the metric filter shown above when building the time-series SQL for each cluster.\n` +
+          `You MUST produce a SEPARATE 13-week forecast for EACH cluster.\n` +
+          `For EACH cluster output a section header "### Cluster <N> — <LABEL>" followed by:\n` +
+          `  1. A validation table: Week | Actual Claims | Predicted Claims | Error %\n` +
+          `  2. A forecast table:   Week | Predicted Claims | 80% CI Lower | 80% CI Upper\n` +
+          `Do NOT combine clusters into a single aggregate forecast.]`,
+        );
+      } else if (opts.clusterInfo) {
+        // Fallback: no thresholds available — surface cluster context only
+        const { nClusters, algorithm } = opts.clusterInfo;
         const summaryLines = opts.clusterSummary
           ? Object.entries(opts.clusterSummary)
               .sort(([a], [b]) => Number(a) - Number(b))
               .map(([cid, { label, count }]) => `  Cluster ${cid} — ${label} (${count} records)`)
               .join('\n')
           : Array.from({ length: nClusters }, (_, i) => `  Cluster ${i}`).join('\n');
-
         parts.push(
-          `\n\n[CLUSTER FORECAST INSTRUCTION — REQUIRED:\n` +
-          `The cohort was segmented into ${nClusters} groups via ${algorithm} clustering.\n` +
-          `Cluster assignments:\n${summaryLines}\n\n` +
-          `Cluster assignments are stored in CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS\n` +
-          `(columns: RECORD_ID VARCHAR, CLUSTER_ID NUMBER, CLUSTER_LABEL VARCHAR).\n\n` +
-          `Include the following CTE verbatim at the top of EVERY SQL query you write:\n` +
-          `  WITH cluster_assignments AS (\n` +
-          `    SELECT RECORD_ID, CLUSTER_ID, CLUSTER_LABEL\n` +
-          `    FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS\n` +
-          `  )\n\n` +
-          `Join to it using: ${joinCond}\n` +
-          `Filter each cluster with: ca.CLUSTER_ID = <N>\n\n` +
-          `You MUST produce a SEPARATE 13-week forecast for EACH cluster (IDs 0 through ${nClusters - 1}).\n` +
-          `For EACH cluster output a section header "### Cluster <N> — <CLUSTER_LABEL>" followed by:\n` +
-          `  1. A validation table: Week | Actual Claims | Predicted Claims | Error %\n` +
-          `  2. A forecast table:   Week | Predicted Claims | 80% CI Lower | 80% CI Upper\n` +
-          `Do NOT combine clusters into a single aggregate forecast.]`,
+          `\n\n[Context: The cohort was previously segmented into ${nClusters} clusters via ${algorithm}:\n` +
+          `${summaryLines}\n` +
+          `Generate a separate 13-week forecast for each cluster where possible.]`,
         );
       }
       break;

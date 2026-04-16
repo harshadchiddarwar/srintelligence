@@ -665,21 +665,31 @@ export class RouteDispatcher {
           .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
           ?.content;
         const isForecastIntent = /^FORECAST_/.test(intent) || intent === 'FORECAST_COMPARE' as string;
-        // If a clustering run preceded this forecast, fetch per-cluster label + count
-        // from CLUSTERING_RESULTS (no record-ID lists — those would exceed the 90K-token
-        // Cortex Agent limit for large cohorts).  The enrichMessage function injects
-        // a verbatim CTE hint so the forecast agent's SQL can JOIN to CLUSTERING_RESULTS
-        // directly instead of relying on in-message ID filters.
         const clusterInfo = this.context.getLastClusterMeta?.();
+
+        // ── Cluster context for forecast ──────────────────────────────────
+        // When a clustering run preceded this forecast we try two things:
+        //
+        // 1. Fetch per-cluster label+count (lightweight summary).
+        // 2. Compute per-cluster metric thresholds by joining the prior cohort
+        //    SQL with CLUSTERING_RESULTS server-side.  These thresholds let the
+        //    forecast agent filter via plain "metric BETWEEN min AND max" SQL —
+        //    no CLUSTERING_RESULTS reference required (Cortex Analyst cannot
+        //    resolve that table since it is outside the semantic model).
         let clusterSummary: Record<number, { label: string; count: number }> | undefined;
+        let clusterThresholds: Record<number, {
+          label: string; count: number; metricCol: string; minVal: number; maxVal: number;
+        }> | undefined;
+
         if (clusterInfo && isForecastIntent) {
+          // Step 1 — lightweight summary (labels + counts)
           try {
-            const summarySQL = `
-              SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, COUNT(*) AS RECORD_CNT
-              FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
-              GROUP BY CLUSTER_ID
-              ORDER BY CLUSTER_ID`;
-            const summaryResult = await executeSQL(summarySQL, SNOWFLAKE_ROLE, signal);
+            const summaryResult = await executeSQL(
+              `SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, COUNT(*) AS RECORD_CNT
+               FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+               GROUP BY CLUSTER_ID ORDER BY CLUSTER_ID`,
+              SNOWFLAKE_ROLE, signal,
+            );
             if (summaryResult.rowCount > 0) {
               clusterSummary = {};
               for (const row of summaryResult.rows) {
@@ -688,18 +698,68 @@ export class RouteDispatcher {
                 const cnt = Number(row['RECORD_CNT'] ?? row['record_cnt'] ?? 0);
                 clusterSummary[cid] = { label: lbl, count: cnt };
               }
-              console.log(`[FORECAST] Cluster summary: ${Object.entries(clusterSummary).map(([k, v]) => `Cluster ${k} (${v.label}): ${v.count} records`).join(', ')}`);
+              console.log(`[FORECAST] Cluster summary: ${
+                Object.entries(clusterSummary).map(([k, v]) => `Cluster ${k} (${v.label}): ${v.count}`).join(', ')}`);
             }
           } catch (err) {
-            console.warn('[FORECAST] Could not fetch cluster summary from CLUSTERING_RESULTS:', err instanceof Error ? err.message : String(err));
+            console.warn('[FORECAST] Could not fetch cluster summary:', err instanceof Error ? err.message : String(err));
+          }
+
+          // Step 2 — metric thresholds (joins prior cohort SQL + CLUSTERING_RESULTS)
+          // Find the primary numeric metric column from the prior analyst result.
+          // Exclude the entity key, date-like columns, and count-style columns.
+          const recordIdCol = clusterInfo.recordIdCol;
+          const metricCol = priorAnalyst?.columns?.find(c =>
+            c !== recordIdCol &&
+            !/^(date|week|month|year|period|time|ds|record_id)/i.test(c),
+          );
+          if (lastSQL && recordIdCol && metricCol && clusterSummary && Object.keys(clusterSummary).length >= 2) {
+            try {
+              // Strip comments, semicolons, and trailing ORDER BY to make a safe CTE
+              const cleanSQL = lastSQL
+                .replace(/--[^\n]*/g, '')
+                .replace(/;/g, '')
+                .replace(/\s+ORDER\s+BY\s+[\s\S]+$/i, '')
+                .trim();
+              const thresholdSQL =
+                `WITH cohort AS (\n${cleanSQL}\n)\n` +
+                `SELECT cr.CLUSTER_ID,\n` +
+                `       MAX(cr.CLUSTER_LABEL)  AS CLUSTER_LABEL,\n` +
+                `       COUNT(*)               AS RECORD_CNT,\n` +
+                `       MIN(cohort.${metricCol}) AS MIN_VAL,\n` +
+                `       MAX(cohort.${metricCol}) AS MAX_VAL\n` +
+                `FROM   cohort\n` +
+                `JOIN   CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS cr\n` +
+                `  ON   CAST(cohort.${recordIdCol} AS VARCHAR) = cr.RECORD_ID\n` +
+                `GROUP  BY cr.CLUSTER_ID\n` +
+                `ORDER  BY cr.CLUSTER_ID`;
+              const threshResult = await executeSQL(thresholdSQL, SNOWFLAKE_ROLE, signal);
+              if (threshResult.rowCount >= 2) {
+                clusterThresholds = {};
+                for (const row of threshResult.rows) {
+                  const cid  = Number(row['CLUSTER_ID'] ?? row['cluster_id']);
+                  const lbl  = String(row['CLUSTER_LABEL'] ?? row['cluster_label'] ?? `Cluster ${cid}`);
+                  const cnt  = Number(row['RECORD_CNT'] ?? row['record_cnt'] ?? 0);
+                  const minV = Number(row['MIN_VAL'] ?? row['min_val'] ?? 0);
+                  const maxV = Number(row['MAX_VAL'] ?? row['max_val'] ?? 0);
+                  clusterThresholds[cid] = { label: lbl, count: cnt, metricCol, minVal: minV, maxVal: maxV };
+                }
+                console.log(`[FORECAST] Cluster thresholds (${metricCol}): ${
+                  Object.entries(clusterThresholds).map(([k, v]) => `Cluster ${k}: ${v.minVal}–${v.maxVal}`).join(', ')}`);
+              }
+            } catch (err) {
+              console.warn('[FORECAST] Could not compute cluster thresholds:', err instanceof Error ? err.message : String(err));
+            }
           }
         }
+
         const enriched = enrichMessage(message, intent, {
           priorSQL: lastSQL ?? undefined,
           priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
           clusterInfo: clusterInfo ?? undefined,
           clusterSummary,
+          clusterThresholds,
         });
         const agentMessages = this.buildAgentMessages(enriched);
 
