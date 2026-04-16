@@ -59,7 +59,7 @@ const CLUSTER_INTENTS = new Set<AgentIntent>([
  * that merely contains the words "segment", "cluster", "group" as nouns.
  */
 const NEW_CLUSTER_REQUEST_RE =
-  /\b(?:cluster(?:ing)?|segment(?:ation)?)\s+(?:the\s+data|this\s+data|these\s+records|by\b|into\b|analysis\b|patients\b|customers\b|records\b|data\b|members\b|claims\b|users\b|physicians\b|drugs\b|population\b)\b|\b(?:run|perform|do|create|find|identify|apply)\s+(?:a\s+)?(?:cluster(?:ing)?|segmentation|grouping)\b/i;
+  /\b(?:re-?cluster(?:ing)?|cluster(?:ing)?|segment(?:ation)?)\s+(?:the\s+data|this\s+data|these\s+records|these\b|this\b|them\b|all\b|by\b|into\b|analysis\b|patients\b|customers\b|records\b|data\b|members\b|claims\b|users\b|physicians\b|drugs\b|population\b)\b|\b(?:run|perform|do|create|find|identify|apply)\s+(?:a\s+)?(?:cluster(?:ing)?|segmentation|grouping)\b|\b(?:\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:cluster|segment|group|partition|cohort)s?\b/i;
 
 // ---------------------------------------------------------------------------
 // Public API
