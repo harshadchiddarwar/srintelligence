@@ -74,6 +74,16 @@ interface ForecastMetrics {
   val_end?: string
 }
 
+/** One cluster's forecast data (used in per-cluster multi-line chart mode) */
+interface ClusterForecast {
+  clusterId: number
+  clusterName: string
+  historical?: ForecastRow[]
+  forecast?: ForecastRow[]
+  validation?: ForecastRow[]
+  metrics?: ForecastMetrics
+}
+
 interface ForecastData {
   historical?: ForecastRow[]
   forecast?: ForecastRow[]
@@ -84,6 +94,8 @@ interface ForecastData {
   notes?: string[]
   insights?: string[]
   summary?: string
+  /** Present when the agent returned per-cluster forecasts (multi-line chart mode) */
+  clusters?: ClusterForecast[]
 }
 
 // ---------------------------------------------------------------------------
@@ -216,92 +228,156 @@ function extractSectionBullets(text: string, sectionPattern: RegExp): string[] {
     .filter(l => l.length > 10)
 }
 
+// ---------------------------------------------------------------------------
+// Shared table-row parsers (used by both single and per-cluster parsing)
+// ---------------------------------------------------------------------------
+
+function parseValidationRows(rows: Record<string, string>[]): ForecastRow[] {
+  return rows.map(r => {
+    const dateKey = Object.keys(r).find(k => /week|date|period/i.test(k)) ?? Object.keys(r)[0]
+    const actualKey = Object.keys(r).find(k => /actual/i.test(k)) ?? ''
+    const predKey = Object.keys(r).find(k => /predict/i.test(k)) ?? ''
+    const errKey = Object.keys(r).find(k => /error/i.test(k)) ?? ''
+    const rawDate = r[dateKey]?.replace(/\*/g, '').trim() ?? ''
+    const errStr = r[errKey]?.replace(/%/g, '').trim()
+    return {
+      date: rawDate,
+      actuals: stripNum(r[actualKey] ?? ''),
+      predicted: stripNum(r[predKey] ?? ''),
+      errorPct: errStr ? parseFloat(errStr) : undefined,
+    } as ForecastRow
+  })
+}
+
+function parseForecastRows(rows: Record<string, string>[]): ForecastRow[] {
+  return rows.map(r => {
+    const dateKey = Object.keys(r).find(k => /week|date|period/i.test(k)) ?? Object.keys(r)[0]
+    const predKey = Object.keys(r).find(k => /predict|forecast/i.test(k)) ?? ''
+    const lowerKey = Object.keys(r).find(k => /lower|ci.low|80.*low/i.test(k)) ?? ''
+    const upperKey = Object.keys(r).find(k => /upper|ci.up|80.*up/i.test(k)) ?? ''
+    const ciKey = !lowerKey ? (Object.keys(r).find(k => /confidence|range|ci|interval/i.test(k)) ?? '') : ''
+    const holKey = Object.keys(r).find(k => /holiday/i.test(k)) ?? ''
+    const rawDate = r[dateKey]?.replace(/\*/g, '').trim() ?? ''
+    // Prefer separate lower/upper columns; fall back to combined "CI Lower – CI Upper" cell
+    let lower: number | undefined, upper: number | undefined
+    if (lowerKey && upperKey) {
+      lower = stripNum(r[lowerKey] ?? '')
+      upper = stripNum(r[upperKey] ?? '')
+    } else if (ciKey) {
+      const ciRaw = r[ciKey] ?? ''
+      const ciParts = ciRaw.split(/\s*[–—\-]\s*/).map(s => stripNum(s))
+      lower = ciParts[0]; upper = ciParts[1]
+    }
+    return {
+      date: rawDate,
+      predicted: stripNum(r[predKey] ?? ''),
+      lower,
+      upper,
+      holiday: r[holKey]?.trim() || undefined,
+    } as ForecastRow
+  })
+}
+
+function classifyTableRows(rows: Record<string, string>[]): 'validation' | 'forecast' | 'other' {
+  if (rows.length === 0) return 'other'
+  const keys = Object.keys(rows[0]).map(k => k.toLowerCase())
+  const hasError = keys.some(k => k.includes('error'))
+  const hasActual = keys.some(k => k.includes('actual'))
+  const hasForecast = keys.some(k =>
+    k.includes('predicted') || k.includes('forecast') || k.includes('confidence') || k.includes('ci')
+  )
+  if (hasActual && hasError) return 'validation'
+  if (hasForecast) return 'forecast'
+  return 'other'
+}
+
 export function parseForecastNarrative(text: string): ForecastData {
   if (!text) return {}
 
-  // ── Metrics ────────────────────────────────────────────────────────────────
+  // ── Detect per-cluster sections ("### Cluster N — Label") ─────────────────
+  // The SRI_FORECAST_AGENT returns one section per cluster when given a
+  // CLUSTER FORECAST INSTRUCTION.  Each section starts with a heading like:
+  //   "### Cluster 0 — Low Volume Physicians"
+  // We split on those headings and parse each independently.
+  const CLUSTER_SECTION_RE = /###\s+Cluster\s+(\d+)[^\n]*/gi
+  const clusterMatches = [...text.matchAll(CLUSTER_SECTION_RE)]
+
+  if (clusterMatches.length >= 2) {
+    // Multi-cluster mode
+    const clusters: ClusterForecast[] = []
+    for (let i = 0; i < clusterMatches.length; i++) {
+      const match = clusterMatches[i]
+      const clusterId = parseInt(match[1])
+      const clusterName = match[0].replace(/^###\s+/, '').trim()
+      const sectionStart = (match.index ?? 0) + match[0].length
+      const sectionEnd = i + 1 < clusterMatches.length
+        ? (clusterMatches[i + 1].index ?? text.length)
+        : text.length
+      const sectionText = text.slice(sectionStart, sectionEnd)
+
+      // Parse tables within this cluster section
+      const sectionTables = extractTables(sectionText)
+      let valRows: ForecastRow[] = []
+      let fcRows: ForecastRow[] = []
+
+      for (const tbl of sectionTables) {
+        const rows = parseMarkdownTable(tbl)
+        if (rows.length === 0) continue
+        const kind = classifyTableRows(rows)
+        if (kind === 'validation') valRows = parseValidationRows(rows)
+        else if (kind === 'forecast') fcRows = parseForecastRows(rows)
+      }
+
+      // Extract per-cluster MAPE/MAE from the section text
+      const mapeM = sectionText.match(/MAPE[^0-9]*([0-9]+\.?[0-9]*)\s*%/i)
+      const maeM  = sectionText.match(/MAE[^0-9]*([0-9,]+)/i)
+      const metrics: ForecastMetrics = {
+        mape: mapeM ? parseFloat(mapeM[1]) : undefined,
+        mae:  maeM  ? stripNum(maeM[1])    : undefined,
+      }
+
+      clusters.push({ clusterId, clusterName, validation: valRows.length > 0 ? valRows : undefined, forecast: fcRows.length > 0 ? fcRows : undefined, metrics })
+    }
+
+    if (clusters.some(c => c.forecast && c.forecast.length > 0)) {
+      return { clusters }
+    }
+    // If we got sections but no forecast rows, fall through to single-cluster parsing
+  }
+
+  // ── Single-cluster parsing (original logic) ────────────────────────────────
   const mapeMatch = text.match(/MAPE[^0-9]*([0-9]+\.?[0-9]*)\s*%/i)
   const mape = mapeMatch ? parseFloat(mapeMatch[1]) : undefined
 
   const maeMatch = text.match(/MAE[^0-9]*([0-9,]+)/i)
   const mae = maeMatch ? stripNum(maeMatch[1]) : undefined
 
-  // Training / validation date ranges
   const trainMatch = text.match(/[Tt]rained on[^(]*\(([^)]+)\)/)?.[1]
     ?? text.match(/[Tt]rained on[^,\n]*/)?.[0]
-  // Stop at period, opening paren, comma, or newline to avoid verbose trailing text
   const valMatch = text.match(/validated on ([^.(,\n]+)/i)?.[1]
 
   const trainedOn = trainMatch?.replace(/[Tt]rained on\s*/i, '').trim()
-  // Clean bold markers from the matched text then strip leading ** if any
   const validatedOn = valMatch?.replace(/\*\*/g, '').trim()
 
-  // Model name
   const modelMatch = text.match(/##\s+[^\n]+—\s*([^\n(]+)/)?.[1]?.trim()
 
-  // ── Tables ─────────────────────────────────────────────────────────────────
   const tables = extractTables(text)
-
   let validationRows: ForecastRow[] = []
   let forecastRows: ForecastRow[] = []
 
   for (const tableBlock of tables) {
     const rows = parseMarkdownTable(tableBlock)
     if (rows.length === 0) continue
-
-    const firstRow = rows[0]
-    const keys = Object.keys(firstRow).map(k => k.toLowerCase())
-
-    const isValidation = keys.some(k => k.includes('actual') || k.includes('error'))
-    const isForecast = keys.some(k => k.includes('predicted') || k.includes('confidence') || k.includes('forecast'))
-
-    if (isValidation && keys.some(k => k.includes('error'))) {
-      // Validation table: Week | Actual | Predicted | Error %
-      validationRows = rows.map(r => {
-        const dateKey = Object.keys(r).find(k => /week|date|period/i.test(k)) ?? Object.keys(r)[0]
-        const actualKey = Object.keys(r).find(k => /actual/i.test(k)) ?? ''
-        const predKey = Object.keys(r).find(k => /predict/i.test(k)) ?? ''
-        const errKey = Object.keys(r).find(k => /error/i.test(k)) ?? ''
-        const rawDate = r[dateKey]?.replace(/\*/g, '').trim() ?? ''
-        const errStr = r[errKey]?.replace(/%/g, '').trim()
-        return {
-          date: rawDate,
-          actuals: stripNum(r[actualKey] ?? ''),
-          predicted: stripNum(r[predKey] ?? ''),
-          errorPct: errStr ? parseFloat(errStr) : undefined,
-        } as ForecastRow
-      })
-    } else if (isForecast) {
-      // Forecast table: Week | Predicted Claims | 80% CI | Holiday?
-      forecastRows = rows.map(r => {
-        const dateKey = Object.keys(r).find(k => /week|date|period/i.test(k)) ?? Object.keys(r)[0]
-        const predKey = Object.keys(r).find(k => /predict|forecast/i.test(k)) ?? ''
-        const ciKey = Object.keys(r).find(k => /confidence|range|ci|interval/i.test(k)) ?? ''
-        const holKey = Object.keys(r).find(k => /holiday/i.test(k)) ?? ''
-        const rawDate = r[dateKey]?.replace(/\*/g, '').trim() ?? ''
-        const ciRaw = r[ciKey] ?? ''
-        // CI range: "31,011 – 34,095" split on en-dash or hyphen
-        const ciParts = ciRaw.split(/\s*[–—\-]\s*/).map(s => stripNum(s))
-        return {
-          date: rawDate,
-          predicted: stripNum(r[predKey] ?? ''),
-          lower: ciParts[0],
-          upper: ciParts[1],
-          holiday: r[holKey]?.trim() || undefined,
-        } as ForecastRow
-      })
-    }
+    const kind = classifyTableRows(rows)
+    if (kind === 'validation') validationRows = parseValidationRows(rows)
+    else if (kind === 'forecast') forecastRows = parseForecastRows(rows)
   }
 
-  // ── Summary ────────────────────────────────────────────────────────────────
   const summaryMatch = text.match(/Summary:\s*([^\n]+)/i)
-  // Strip leading standalone markdown markers (e.g. "** " at line start) that agents sometimes emit
   const summary = summaryMatch?.[1]?.trim().replace(/^\*{1,2}\s+/, '')
 
-  // ── Model notes ────────────────────────────────────────────────────────────
   const modelNotes = extractSectionBullets(text, /###\s*(Model.Specific Caveats|Model Notes|Notes|Caveats)/i)
 
-  // ── Insights ───────────────────────────────────────────────────────────────
   const insights: string[] = []
   if (mape != null) {
     const acc = mape < 10 ? 'high' : mape < 20 ? 'moderate' : 'low'
@@ -310,7 +386,6 @@ export function parseForecastNarrative(text: string): ForecastData {
   if (mae != null) {
     insights.push(`Mean absolute error (MAE): ${mae.toLocaleString()} units.`)
   }
-  // Note: summary is rendered separately above BulletList — do not push here to avoid duplication
 
   return {
     forecast: forecastRows.length > 0 ? forecastRows : undefined,
@@ -611,6 +686,156 @@ function CustomTooltip({
 }
 
 // ---------------------------------------------------------------------------
+// Multi-cluster line chart (no CI)
+// ---------------------------------------------------------------------------
+
+// Fixed palette — one colour per cluster (up to 8)
+const CLUSTER_COLORS = [
+  '#3b82f6', // blue
+  '#10b981', // emerald
+  '#f59e0b', // amber
+  '#ef4444', // red
+  '#8b5cf6', // violet
+  '#06b6d4', // cyan
+  '#f97316', // orange
+  '#84cc16', // lime
+]
+
+function MultiClusterForecastChart({ clusters }: { clusters: ClusterForecast[] }) {
+  // Merge all dates across clusters into one unified timeline
+  const allDates = Array.from(
+    new Set(
+      clusters.flatMap(c => [
+        ...(c.validation ?? []).map(r => r.date ?? r.week ?? r.ds ?? r.period ?? ''),
+        ...(c.forecast  ?? []).map(r => r.date ?? r.week ?? r.ds ?? r.period ?? ''),
+      ])
+    )
+  ).sort()
+
+  // Build recharts data: [{date, 'Cluster 0 Actual', 'Cluster 0 Forecast', ...}]
+  const chartData = allDates.map(date => {
+    const point: Record<string, string | number | undefined> = { date }
+    for (const c of clusters) {
+      const label = c.clusterName.replace(/^###\s*/, '')
+      const valRow = c.validation?.find(r => (r.date ?? r.week ?? r.ds ?? r.period) === date)
+      const fcRow  = c.forecast?.find( r => (r.date ?? r.week ?? r.ds ?? r.period) === date)
+      if (valRow) point[`${label} Actual`]   = normaliseActuals(valRow) ?? normalisePredicted(valRow)
+      if (fcRow)  point[`${label} Forecast`] = normalisePredicted(fcRow)
+    }
+    return point
+  })
+
+  const CHART_HEIGHT = 300
+  const CHART_MIN_WIDTH = 700
+  const scrollWidth = Math.max(CHART_MIN_WIDTH, allDates.length * 16)
+
+  // Find the boundary between validation and forecast in the timeline
+  const lastValDate = clusters
+    .flatMap(c => c.validation ?? [])
+    .map(r => r.date ?? r.week ?? r.ds ?? r.period ?? '')
+    .sort()
+    .at(-1)
+
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border border-gray-200 bg-white p-4">
+      <div className="text-sm font-semibold text-gray-800">Forecast by Cluster</div>
+
+      <div style={{ overflowX: 'auto' }}>
+        <div style={{ width: scrollWidth, height: CHART_HEIGHT }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 40, left: 16 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 10, fill: '#6b7280' }}
+                angle={-35}
+                textAnchor="end"
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: '#6b7280' }}
+                tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)}
+                width={52}
+              />
+              <Tooltip
+                formatter={(value: number, name: string) => [
+                  value != null ? value.toLocaleString() : '—', name
+                ]}
+                labelStyle={{ fontSize: 11 }}
+                contentStyle={{ fontSize: 11 }}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+              {lastValDate && (
+                <ReferenceLine x={lastValDate} stroke="#9ca3af" strokeDasharray="4 4" label={{ value: 'Forecast →', position: 'insideTopRight', fontSize: 10, fill: '#9ca3af' }} />
+              )}
+              {clusters.map((c, i) => {
+                const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+                const label = c.clusterName.replace(/^###\s*/, '')
+                return (
+                  <React.Fragment key={c.clusterId}>
+                    <Line
+                      type="monotone"
+                      dataKey={`${label} Actual`}
+                      stroke={color}
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls={false}
+                      name={`${label} (Actual)`}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey={`${label} Forecast`}
+                      stroke={color}
+                      strokeWidth={2}
+                      strokeDasharray="5 3"
+                      dot={false}
+                      connectNulls={false}
+                      name={`${label} (Forecast)`}
+                    />
+                  </React.Fragment>
+                )
+              })}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Per-cluster summary table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="border-b border-gray-200 text-left text-gray-500 uppercase tracking-wide">
+              <th className="py-2 pr-4">Cluster</th>
+              <th className="py-2 pr-4">MAPE</th>
+              <th className="py-2 pr-4">MAE</th>
+              <th className="py-2">Forecast Weeks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {clusters.map((c, i) => (
+              <tr key={c.clusterId} className="border-b border-gray-100">
+                <td className="py-1.5 pr-4 font-medium" style={{ color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] }}>
+                  {c.clusterName.replace(/^###\s*/, '')}
+                </td>
+                <td className="py-1.5 pr-4 text-gray-700">
+                  {c.metrics?.mape != null ? `${c.metrics.mape.toFixed(1)}%` : '—'}
+                </td>
+                <td className="py-1.5 pr-4 text-gray-700">
+                  {c.metrics?.mae != null ? c.metrics.mae.toLocaleString() : '—'}
+                </td>
+                <td className="py-1.5 text-gray-700">
+                  {c.forecast?.length ?? 0}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -629,6 +854,14 @@ export default function ForecastArtifact({ artifact }: Props) {
       ? artifact.data
       : parseForecastNarrative(artifact.narrative ?? '')
   ) as ForecastData
+
+  // ── Multi-cluster chart mode ───────────────────────────────────────────────
+  // When the agent returned per-cluster forecasts, render a single line chart
+  // with one line per cluster (actual + forecast). No CI bands.
+  if (raw.clusters && raw.clusters.length >= 2) {
+    return <MultiClusterForecastChart clusters={raw.clusters} />
+  }
+
   const metrics = raw.metrics ?? {}
   const historical = sortByDate(raw.historical ?? [])
   const forecastRows = sortByDate(raw.forecast ?? [])

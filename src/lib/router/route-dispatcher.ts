@@ -664,10 +664,14 @@ export class RouteDispatcher {
           .reverse()
           .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
           ?.content;
+        // If a clustering run preceded this forecast, include cluster context
+        // so the agent generates per-cluster forecasts scoped to CLUSTERING_RESULTS.
+        const clusterInfo = this.context.getLastClusterMeta?.();
         const enriched = enrichMessage(message, intent, {
           priorSQL: lastSQL ?? undefined,
           priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
+          clusterInfo: clusterInfo ?? undefined,
         });
         const agentMessages = this.buildAgentMessages(enriched);
 
@@ -1063,6 +1067,19 @@ const nSegmentsUsed = (parsedMeta['n_clusters'] as number | undefined) ?? nClust
       signal,
     ).catch((err) => {
       console.error('[CLUSTER] Persistence failed (non-fatal):', err instanceof Error ? err.message : String(err));
+    });
+
+    // ── Step 5b: Store cluster metadata in context ───────────────────────────
+    // Lets downstream FORECAST / CAUSAL steps know about cluster assignments
+    // without re-running the UDTF. recordIdCol is extracted from the UDTF SQL
+    // (CAST(col AS VARCHAR) AS RECORD_ID pattern).
+    const idColMatch = udtfSQL.match(/CAST\((\w+)\s+AS\s+VARCHAR\)\s+AS\s+RECORD_ID/i);
+    const recordIdCol = idColMatch?.[1];
+    this.context.storeClusterMeta({
+      nClusters: nSegmentsUsed,
+      recordIdCol,
+      algorithm: algorithmLabel,
+      runId,
     });
 
     // ── Step 6: Build narrative from MODEL_METADATA ─────────────────────────

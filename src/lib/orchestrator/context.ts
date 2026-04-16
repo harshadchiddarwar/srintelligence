@@ -180,6 +180,53 @@ export class ExecutionContext implements AgentContext {
     return undefined;
   }
 
+  /**
+   * Stores metadata about the most recent clustering run so that downstream
+   * FORECAST / CAUSAL agents can reference cluster assignments.
+   */
+  storeClusterMeta(meta: {
+    nClusters: number;
+    recordIdCol: string | undefined;
+    algorithm: string;
+    runId: string;
+  }): void {
+    this.intermediateResults.set('CLUSTER_META_latest', {
+      success: true,
+      durationMs: 0,
+      retryCount: 0,
+      artifact: {
+        id: 'cluster_meta',
+        agentName: 'cluster',
+        intent: 'CLUSTER' as import('../../types/agent').AgentIntent,
+        sql: '',
+        data: meta,
+        narrative: '',
+        createdAt: Date.now(),
+        lineageId: '',
+        cacheStatus: 'miss',
+      },
+    });
+  }
+
+  /**
+   * Returns metadata from the most recent clustering run, if any.
+   */
+  getLastClusterMeta(): {
+    nClusters: number;
+    recordIdCol: string | undefined;
+    algorithm: string;
+    runId: string;
+  } | undefined {
+    const entry = this.intermediateResults.get('CLUSTER_META_latest');
+    if (!entry?.artifact?.data) return undefined;
+    return entry.artifact.data as {
+      nClusters: number;
+      recordIdCol: string | undefined;
+      algorithm: string;
+      runId: string;
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Semantic view switching
   // ---------------------------------------------------------------------------

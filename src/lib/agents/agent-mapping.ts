@@ -268,6 +268,13 @@ export function enrichMessage(
     priorColumns?: string[];
     priorData?: Record<string, unknown>;
     nClusters?: number; // explicit cluster count override for cluster intents
+    /** Metadata from the most recent clustering run — used to inject cluster context for FORECAST. */
+    clusterInfo?: {
+      nClusters: number;
+      recordIdCol: string | undefined;
+      algorithm: string;
+      runId: string;
+    };
   } = {},
 ): string {
   const parts: string[] = [message];
@@ -332,6 +339,28 @@ export function enrichMessage(
       }
       if (opts.priorData?.['valueCol']) {
         parts.push(`[Value column: ${String(opts.priorData['valueCol'])}]`);
+      }
+
+      // ── Per-cluster forecast instruction ──────────────────────────────────
+      // If the prior turn included a clustering run, tell the agent to produce
+      // a separate forecast for each cluster using the CLUSTERING_RESULTS table.
+      if (opts.clusterInfo) {
+        const { nClusters, recordIdCol, algorithm } = opts.clusterInfo;
+        const joinClause = recordIdCol
+          ? `CAST(${recordIdCol} AS VARCHAR) = cr.RECORD_ID`
+          : `<entity_id_col>::VARCHAR = cr.RECORD_ID`;
+        parts.push(
+          `\n\n[CLUSTER FORECAST INSTRUCTION — REQUIRED:\n` +
+          `The cohort has been segmented into ${nClusters} groups using ${algorithm} clustering.\n` +
+          `Cluster assignments are in table: CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS (columns: RECORD_ID VARCHAR, CLUSTER_ID NUMBER, CLUSTER_LABEL VARCHAR).\n` +
+          `Join the time-series aggregation to this table using: ${joinClause}\n` +
+          `You MUST produce a SEPARATE 13-week forecast for EACH cluster (CLUSTER_ID 0 through ${nClusters - 1}).\n` +
+          `For each cluster, output a section header "### Cluster <N> — <CLUSTER_LABEL>" followed by:\n` +
+          `  1. A validation table with columns: Week | Actual Claims | Predicted Claims | Error %\n` +
+          `  2. A forecast table with columns: Week | Predicted Claims | 80% CI Lower | 80% CI Upper\n` +
+          `Do NOT combine clusters into a single aggregate forecast.\n` +
+          `End each cluster section with a one-line summary of key trend.]`,
+        );
       }
       break;
     }
