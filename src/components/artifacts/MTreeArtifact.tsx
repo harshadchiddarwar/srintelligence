@@ -226,12 +226,11 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
         Root
       </div>
 
-      {/* Connector from root to children row */}
+      {/* Connector from root to the horizontal bar */}
       <div className="w-0.5 h-6 bg-gray-300" />
 
       {/* Horizontal connector spanning all children */}
-      <div className="relative flex items-start justify-center w-full">
-        {/* The horizontal bar */}
+      <div className="relative w-full" style={{ height: 2 }}>
         <div
           className="absolute top-0 bg-gray-300"
           style={{
@@ -240,62 +239,60 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
             right: nodes.length > 1 ? `${(1 / (nodes.length * 2)) * 100}%` : '50%',
           }}
         />
+      </div>
 
-        {/* Child nodes — items-stretch makes every column the same height */}
-        <div className="flex items-stretch gap-4 w-full justify-center">
-          {nodes.map((node, i) => {
-            const color = NODE_COLORS[i % NODE_COLORS.length]
-            const barPct = (node.importance / maxImportance) * 100
-            const label = interpretationLabel(node.rank, node.importance)
-            const detail = interpretationDetail(node.rank, node.feature, node.importance, node.interpretation)
-
-            return (
-              <div key={node.feature} className="flex flex-col items-center gap-0 flex-1 min-w-0" style={{ maxWidth: 200 }}>
-                {/* Vertical connector from horizontal bar to node */}
-                <div className="w-0.5 h-6 bg-gray-300 shrink-0" />
-
-                {/* Node box — flex-1 makes it fill equal height across all siblings */}
-                <div
-                  className="rounded-xl border-2 px-3 py-2.5 text-center w-full shadow-sm flex flex-col items-center justify-center flex-1"
-                  style={{ borderColor: color, background: `${color}12` }}
-                >
-                  <div className="font-bold text-xs truncate w-full" style={{ color }}>
-                    {node.feature}
-                  </div>
-                  {node.rank === 1 && (
-                    <span
-                      className="inline-block mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
-                      style={{ background: color }}
-                    >
-                      Top Driver
-                    </span>
-                  )}
+      {/* ── Row A: vertical drop connectors + node boxes (items-stretch = equal height) ── */}
+      <div className="flex items-stretch gap-4 w-full justify-center">
+        {nodes.map((node, i) => {
+          const color = NODE_COLORS[i % NODE_COLORS.length]
+          return (
+            <div key={node.feature} className="flex flex-col items-center flex-1 min-w-0" style={{ maxWidth: 200 }}>
+              {/* Vertical drop from horizontal bar to node box */}
+              <div className="w-0.5 h-6 bg-gray-300 shrink-0" />
+              {/* Node box — no variable-height content here → all boxes match the tallest */}
+              <div
+                className="rounded-xl border-2 px-3 py-2.5 text-center w-full shadow-sm flex flex-col items-center justify-center flex-1"
+                style={{ borderColor: color, background: `${color}12` }}
+              >
+                <div className="font-bold text-xs w-full break-words" style={{ color }}>
+                  {node.feature}
                 </div>
-
-                {/* Feature importance bar + score */}
-                <div className="mt-2.5 w-full px-1 shrink-0">
-                  <div className="flex items-center justify-between text-[10px] mb-1">
-                    <span className="font-semibold" style={{ color }}>
-                      Importance
-                    </span>
-                    <span className="font-mono tabular-nums text-gray-600">
-                      {node.importance.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full"
-                      style={{ width: `${barPct}%`, background: color }}
-                    />
-                  </div>
-                  <p className="mt-1.5 text-[10px] text-gray-500 leading-snug text-center">
-                    {label} — {detail}
-                  </p>
-                </div>
+                {node.rank === 1 && (
+                  <span
+                    className="inline-block mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+                    style={{ background: color }}
+                  >
+                    Top Driver
+                  </span>
+                )}
               </div>
-            )
-          })}
-        </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* ── Row B: importance bars (separate row — doesn't affect node-box heights) ── */}
+      <div className="flex gap-4 w-full justify-center mt-3">
+        {nodes.map((node, i) => {
+          const color = NODE_COLORS[i % NODE_COLORS.length]
+          const barPct = (node.importance / maxImportance) * 100
+          const label = interpretationLabel(node.rank, node.importance)
+          const detail = interpretationDetail(node.rank, node.feature, node.importance, node.interpretation)
+          return (
+            <div key={`imp-${node.feature}`} className="flex-1 min-w-0 px-1" style={{ maxWidth: 200 }}>
+              <div className="flex items-center justify-between text-[10px] mb-1">
+                <span className="font-semibold" style={{ color }}>Importance</span>
+                <span className="font-mono tabular-nums text-gray-600">{node.importance.toFixed(2)}</span>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{ width: `${barPct}%`, background: color }} />
+              </div>
+              <p className="mt-1.5 text-[10px] text-gray-500 leading-snug text-center">
+                {label} — {detail}
+              </p>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -332,6 +329,21 @@ function WaterfallChart({ items, baseline, current }: WaterfallChartProps) {
     return <p className="text-sm text-gray-400 italic">No waterfall data available.</p>
   }
 
+  // ── Normalise contributions so baseline + Σ contributions = final ─────────
+  // The agent sometimes emits absolute market-share percentages instead of
+  // delta pp values, which makes the staircase wildly overshoot the final bar.
+  // Scaling every contribution by the same factor preserves their relative
+  // proportions while guaranteeing the chart is visually coherent.
+  const baseVal  = baseline ?? 0
+  const rawSum   = items.reduce((s, i) => s + i.contribution, 0)
+  const finalVal = current ?? (baseVal + rawSum)
+  const targetGap = finalVal - baseVal  // the gap we need to bridge
+
+  const scaledItems: WaterfallItem[] =
+    rawSum !== 0 && Math.abs(rawSum - targetGap) > 0.001
+      ? items.map(i => ({ ...i, contribution: (i.contribution / rawSum) * targetGap }))
+      : items
+
   // Build recharts data: invisible "offset" bar + visible value bar
   type WFPoint = {
     name: string
@@ -342,16 +354,13 @@ function WaterfallChart({ items, baseline, current }: WaterfallChartProps) {
     raw: number
   }
 
-  let running = baseline ?? 0
   const chartData: WFPoint[] = []
 
-  // Optional baseline bar
-  if (baseline != null) {
-    chartData.push({ name: 'Baseline', offset: 0, value: baseline, isNeg: false, isTotal: true, raw: baseline })
-    running = baseline
-  }
+  // Baseline bar — always shown (full bar from 0)
+  chartData.push({ name: 'Baseline', offset: 0, value: baseVal, isNeg: false, isTotal: true, raw: baseVal })
+  let running = baseVal
 
-  for (const item of items) {
+  for (const item of scaledItems) {
     const isNeg = item.contribution < 0
     const offset = isNeg ? running + item.contribution : running
     chartData.push({
@@ -365,11 +374,8 @@ function WaterfallChart({ items, baseline, current }: WaterfallChartProps) {
     running += item.contribution
   }
 
-  // Final total bar
-  if (current != null || items.length > 0) {
-    const totalVal = current ?? running
-    chartData.push({ name: 'Final', offset: 0, value: totalVal, isNeg: false, isTotal: true, raw: totalVal })
-  }
+  // Final bar — always shown (full bar from 0)
+  chartData.push({ name: 'Final', offset: 0, value: finalVal, isNeg: false, isTotal: true, raw: finalVal })
 
   const maxVal = Math.max(...chartData.map(d => d.offset + d.value), 1)
   const chartH = 280
