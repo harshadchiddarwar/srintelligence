@@ -8,7 +8,7 @@
  *  - Typed rows mapped by column name
  */
 
-import { authManager } from './auth';
+import { getAuthManager } from './auth';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -264,7 +264,7 @@ async function pollForResult(
  *                    is prepended using a multi-statement request.
  */
 export async function executeSQL(sql: string, userRole?: string, signal?: AbortSignal): Promise<SQLResult> {
-  const headers = await authManager.getAuthHeaders();
+  const headers = await getAuthManager().getAuthHeaders();
 
   // Unique per-call label so concurrent executeSQL() invocations don't collide
   // on the same console.time() namespace.

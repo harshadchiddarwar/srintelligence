@@ -22,7 +22,7 @@
  * agentic loop without any extra round-trips from the caller.
  */
 
-import { authManager } from './auth';
+import { getAuthManager } from './auth';
 import { executeSQL } from './sql-api';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -207,7 +207,7 @@ export async function callCortexAgent(
   // Fetch auth headers once — reused across iterations
   let baseHeaders: Record<string, string>;
   try {
-    baseHeaders = await authManager.getAuthHeaders();
+    baseHeaders = await getAuthManager().getAuthHeaders();
   } catch (authErr) {
     return { text: '', executionTimeMs: Date.now() - startMs, error: `Auth error: ${authErr instanceof Error ? authErr.message : String(authErr)}` };
   }

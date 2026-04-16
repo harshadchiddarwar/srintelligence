@@ -20,7 +20,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { authManager } from '../snowflake/auth';
+import { getAuthManager } from '../snowflake/auth';
 import type {
   AgentInput,
   AgentResult,
@@ -214,7 +214,7 @@ export class MTreeAgent {
   // -------------------------------------------------------------------------
 
   private async callCortexAgent(message: string): Promise<string> {
-    const headers = await authManager.getAuthHeaders();
+    const headers = await getAuthManager().getAuthHeaders();
 
     const requestBody: CortexAgentRequest = {
       model: AGENT_MODEL,

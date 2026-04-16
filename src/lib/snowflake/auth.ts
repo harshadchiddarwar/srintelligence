@@ -6,7 +6,7 @@
  *   2. JWT  — SNOWFLAKE_PRIVATE_KEY env var is set → RS256 key-pair JWT
  *
  * Export: class SnowflakeAuthManager (singleton via getInstance())
- * Export: const authManager (pre-constructed singleton)
+ * Export: function getAuthManager() — lazy singleton getter
  */
 
 import crypto from 'crypto';
@@ -192,5 +192,8 @@ export class SnowflakeAuthManager {
   }
 }
 
-// Pre-constructed singleton exported for convenience
-export const authManager = SnowflakeAuthManager.getInstance();
+// Lazy getter — do NOT instantiate at module load time so that the build
+// succeeds even when env vars are absent (e.g. during Vercel's build phase).
+export function getAuthManager(): SnowflakeAuthManager {
+  return SnowflakeAuthManager.getInstance();
+}

@@ -8,7 +8,7 @@
  * SQL is executed separately by analyst-agent.ts via executeSQL().
  */
 
-import { authManager } from './auth';
+import { getAuthManager } from './auth';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,7 +71,7 @@ export async function callCortexAnalyst(params: {
     return { text: '', suggestions: [], error: 'No semantic view configured for this session.' };
   }
 
-  const baseHeaders = await authManager.getAuthHeaders();
+  const baseHeaders = await getAuthManager().getAuthHeaders();
   const headers: Record<string, string> = {
     ...baseHeaders,
     'X-Snowflake-Role': SNOWFLAKE_ROLE,
