@@ -758,8 +758,8 @@ function MultiClusterForecastChart({ clusters }: { clusters: ClusterForecast[] }
                 width={52}
               />
               <Tooltip
-                formatter={(value: number, name: string) => [
-                  value != null ? value.toLocaleString() : '—', name
+                formatter={(value: unknown, name: unknown) => [
+                  value != null ? Number(value).toLocaleString() : '—', String(name ?? '')
                 ]}
                 labelStyle={{ fontSize: 11 }}
                 contentStyle={{ fontSize: 11 }}
