@@ -482,9 +482,17 @@ export default function ThreadPage() {
       // ── Cohort handoff: find last ANALYST result and pass SQL + columns ──────
       // This ensures clustering / forecasting / causal agents scope to the same
       // cohort even if the server restarted and lost in-memory intermediateResults.
+      // We require tableData.headers to be non-empty to distinguish analyst messages
+      // from cluster/forecast messages (which have segmentData/forecastData instead).
       const lastAnalystMsg = [...thread.messages]
         .reverse()
-        .find((m) => m.role === "agent" && sqlMap[m.id]);
+        .find(
+          (m) =>
+            m.role === "agent" &&
+            sqlMap[m.id] &&
+            Array.isArray(m.tableData?.headers) &&
+            (m.tableData?.headers?.length ?? 0) > 0,
+        );
       const priorAnalystSQL     = lastAnalystMsg ? sqlMap[lastAnalystMsg.id] : undefined;
       const priorAnalystColumns = lastAnalystMsg?.tableData?.headers;
 
