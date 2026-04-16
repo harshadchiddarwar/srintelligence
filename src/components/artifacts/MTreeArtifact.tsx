@@ -157,11 +157,24 @@ function parseMTreeNarrative(text: string): MTreeData {
     summary = paras[paras.length - 1]?.trim() ?? ''
   }
 
-  // ── Extract overall change metric ──────────────────────────────────────────
+  // ── Extract overall change metric, baseline, current ──────────────────────
   const changeM = cleaned.match(/([+\-]?\d+\.?\d*)\s*pp\s*(?:market\s+share|change|increase|decrease)/i)
   const change = changeM ? parseFloat(changeM[1]) : undefined
 
-  return { nodes, waterfall, insights, summary, change }
+  // Look for "from X% to Y%" or "Baseline: X%" / "Final: Y%" patterns
+  const fromToM = cleaned.match(/from\s+([\d.]+)%\s+to\s+([\d.]+)%/i)
+  const baseline = fromToM
+    ? parseFloat(fromToM[1])
+    : cleaned.match(/[Bb]aseline[:\s]+([\d.]+)%/)?.[1]
+      ? parseFloat(cleaned.match(/[Bb]aseline[:\s]+([\d.]+)%/)![1])
+      : undefined
+  const current = fromToM
+    ? parseFloat(fromToM[2])
+    : cleaned.match(/[Ff]inal[:\s]+([\d.]+)%/)?.[1]
+      ? parseFloat(cleaned.match(/[Ff]inal[:\s]+([\d.]+)%/)![1])
+      : baseline != null && change != null ? baseline + change : undefined
+
+  return { nodes, waterfall, insights, summary, change, baseline, current }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +241,8 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
           }}
         />
 
-        {/* Child nodes */}
-        <div className="flex gap-4 w-full justify-center">
+        {/* Child nodes — items-stretch makes every column the same height */}
+        <div className="flex items-stretch gap-4 w-full justify-center">
           {nodes.map((node, i) => {
             const color = NODE_COLORS[i % NODE_COLORS.length]
             const barPct = (node.importance / maxImportance) * 100
@@ -239,14 +252,14 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
             return (
               <div key={node.feature} className="flex flex-col items-center gap-0 flex-1 min-w-0" style={{ maxWidth: 200 }}>
                 {/* Vertical connector from horizontal bar to node */}
-                <div className="w-0.5 h-6 bg-gray-300" />
+                <div className="w-0.5 h-6 bg-gray-300 shrink-0" />
 
-                {/* Node box */}
+                {/* Node box — flex-1 makes it fill equal height across all siblings */}
                 <div
-                  className="rounded-xl border-2 px-3 py-2.5 text-center w-full shadow-sm"
+                  className="rounded-xl border-2 px-3 py-2.5 text-center w-full shadow-sm flex flex-col items-center justify-center flex-1"
                   style={{ borderColor: color, background: `${color}12` }}
                 >
-                  <div className="font-bold text-xs truncate" style={{ color }}>
+                  <div className="font-bold text-xs truncate w-full" style={{ color }}>
                     {node.feature}
                   </div>
                   {node.rank === 1 && (
@@ -260,7 +273,7 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
                 </div>
 
                 {/* Feature importance bar + score */}
-                <div className="mt-2.5 w-full px-1">
+                <div className="mt-2.5 w-full px-1 shrink-0">
                   <div className="flex items-center justify-between text-[10px] mb-1">
                     <span className="font-semibold" style={{ color }}>
                       Importance
@@ -355,7 +368,7 @@ function WaterfallChart({ items, baseline, current }: WaterfallChartProps) {
   // Final total bar
   if (current != null || items.length > 0) {
     const totalVal = current ?? running
-    chartData.push({ name: 'Total', offset: 0, value: totalVal, isNeg: false, isTotal: true, raw: totalVal })
+    chartData.push({ name: 'Final', offset: 0, value: totalVal, isNeg: false, isTotal: true, raw: totalVal })
   }
 
   const maxVal = Math.max(...chartData.map(d => d.offset + d.value), 1)
@@ -429,7 +442,7 @@ function WaterfallChart({ items, baseline, current }: WaterfallChartProps) {
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-sm" style={{ background: WATERFALL_BASE }} />
-          Total
+          Baseline / Final
         </span>
       </div>
     </div>
@@ -485,7 +498,7 @@ function InsightsSummaryCard({
                   </span>
                   <p className="text-sm text-gray-700 leading-relaxed">
                     {heading && (
-                      <span className="font-semibold text-gray-900">{heading}: </span>
+                      <span className="font-semibold text-gray-900">{renderMd(heading)}: </span>
                     )}
                     {renderMd(body)}
                   </p>
