@@ -665,39 +665,33 @@ export class RouteDispatcher {
           .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
           ?.content;
         const isForecastIntent = /^FORECAST_/.test(intent) || intent === 'FORECAST_COMPARE' as string;
-        // If a clustering run preceded this forecast, fetch per-cluster record IDs
-        // from CLUSTERING_RESULTS and pass them as explicit IN lists.
-        // This bypasses the CLUSTERING_RESULTS JOIN via Cortex Analyst (which can't
-        // access that table since it's not in the semantic model).  With IN lists,
-        // Cortex Analyst only touches semantic model tables and the filter is injected
-        // directly into each cluster's query by the forecast agent.
+        // If a clustering run preceded this forecast, fetch per-cluster label + count
+        // from CLUSTERING_RESULTS (no record-ID lists — those would exceed the 90K-token
+        // Cortex Agent limit for large cohorts).  The enrichMessage function injects
+        // a verbatim CTE hint so the forecast agent's SQL can JOIN to CLUSTERING_RESULTS
+        // directly instead of relying on in-message ID filters.
         const clusterInfo = this.context.getLastClusterMeta?.();
-        let clusterAssignments: Record<number, { label: string; recordIds: string[] }> | undefined;
+        let clusterSummary: Record<number, { label: string; count: number }> | undefined;
         if (clusterInfo && isForecastIntent) {
           try {
-            const assignSQL = `
-              SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, ARRAY_AGG(RECORD_ID) AS RECORD_IDS
+            const summarySQL = `
+              SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, COUNT(*) AS RECORD_CNT
               FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
               GROUP BY CLUSTER_ID
               ORDER BY CLUSTER_ID`;
-            const assignResult = await executeSQL(assignSQL, SNOWFLAKE_ROLE, signal);
-            if (assignResult.rowCount > 0) {
-              clusterAssignments = {};
-              for (const row of assignResult.rows) {
+            const summaryResult = await executeSQL(summarySQL, SNOWFLAKE_ROLE, signal);
+            if (summaryResult.rowCount > 0) {
+              clusterSummary = {};
+              for (const row of summaryResult.rows) {
                 const cid = Number(row['CLUSTER_ID'] ?? row['cluster_id']);
                 const lbl = String(row['CLUSTER_LABEL'] ?? row['cluster_label'] ?? `Cluster ${cid}`);
-                const ids = row['RECORD_IDS'] ?? row['record_ids'];
-                const idArr: string[] = Array.isArray(ids)
-                  ? ids.map(String)
-                  : typeof ids === 'string'
-                    ? JSON.parse(ids) as string[]
-                    : [];
-                clusterAssignments[cid] = { label: lbl, recordIds: idArr };
+                const cnt = Number(row['RECORD_CNT'] ?? row['record_cnt'] ?? 0);
+                clusterSummary[cid] = { label: lbl, count: cnt };
               }
-              console.log(`[FORECAST] Fetched cluster assignments: ${Object.entries(clusterAssignments).map(([k, v]) => `Cluster ${k}: ${v.recordIds.length} records`).join(', ')}`);
+              console.log(`[FORECAST] Cluster summary: ${Object.entries(clusterSummary).map(([k, v]) => `Cluster ${k} (${v.label}): ${v.count} records`).join(', ')}`);
             }
           } catch (err) {
-            console.warn('[FORECAST] Could not fetch cluster assignments from CLUSTERING_RESULTS:', err instanceof Error ? err.message : String(err));
+            console.warn('[FORECAST] Could not fetch cluster summary from CLUSTERING_RESULTS:', err instanceof Error ? err.message : String(err));
           }
         }
         const enriched = enrichMessage(message, intent, {
@@ -705,7 +699,7 @@ export class RouteDispatcher {
           priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
           clusterInfo: clusterInfo ?? undefined,
-          clusterAssignments,
+          clusterSummary,
         });
         const agentMessages = this.buildAgentMessages(enriched);
 

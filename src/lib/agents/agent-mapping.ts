@@ -276,11 +276,12 @@ export function enrichMessage(
       runId: string;
     };
     /**
-     * Per-cluster record ID lists fetched from CLUSTERING_RESULTS.
-     * When present, cluster context is injected as explicit IN lists so Cortex Analyst
-     * doesn't need to access CLUSTERING_RESULTS (which is outside the semantic model).
+     * Per-cluster summary (label + record count) fetched from CLUSTERING_RESULTS.
+     * Used to add cluster size context to the forecast instruction without passing
+     * all record IDs (which would exceed the 90K-token Cortex Agent limit).
+     * The actual filtering is done via a verbatim CTE in the enriched message.
      */
-    clusterAssignments?: Record<number, { label: string; recordIds: string[] }>;
+    clusterSummary?: Record<number, { label: string; count: number }>;
   } = {},
 ): string {
   const parts: string[] = [message];
@@ -348,41 +349,42 @@ export function enrichMessage(
       }
 
       // ── Per-cluster forecast instruction ──────────────────────────────────
-      // When clusterAssignments are available (fetched from CLUSTERING_RESULTS
-      // server-side), inject explicit IN lists per cluster so Cortex Analyst
-      // does NOT need to access CLUSTERING_RESULTS (outside the semantic model).
-      if (opts.clusterAssignments && Object.keys(opts.clusterAssignments).length >= 2) {
-        const { clusterAssignments } = opts;
-        const recordIdCol = opts.clusterInfo?.recordIdCol;
-        const algorithm = opts.clusterInfo?.algorithm ?? 'clustering';
-        const nClusters = Object.keys(clusterAssignments).length;
-        const clusterLines = Object.entries(clusterAssignments)
-          .map(([cidStr, { label, recordIds }]) => {
-            const idList = recordIds.map((id) => `'${id}'`).join(', ');
-            const filterCol = recordIdCol ?? 'entity_id';
-            return (
-              `  Cluster ${cidStr} — ${label} (${recordIds.length} records):\n` +
-              `    SQL filter: CAST(${filterCol} AS VARCHAR) IN (${idList})`
-            );
-          })
-          .join('\n');
+      // Instructs the forecast agent to produce a separate forecast per cluster.
+      // We reference CLUSTERING_RESULTS via a verbatim CTE hint so the agent's
+      // SQL can join to it — this avoids embedding thousands of record IDs in
+      // the message (which would exceed the 90K-token Cortex Agent limit).
+      if (opts.clusterInfo) {
+        const { nClusters, recordIdCol, algorithm } = opts.clusterInfo;
+        const joinCond = recordIdCol
+          ? `CAST(${recordIdCol} AS VARCHAR) = ca.RECORD_ID`
+          : `<entity_id_column>::VARCHAR = ca.RECORD_ID`;
+
+        // Build cluster labels/counts line (if summary available)
+        const summaryLines = opts.clusterSummary
+          ? Object.entries(opts.clusterSummary)
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([cid, { label, count }]) => `  Cluster ${cid} — ${label} (${count} records)`)
+              .join('\n')
+          : Array.from({ length: nClusters }, (_, i) => `  Cluster ${i}`).join('\n');
+
         parts.push(
           `\n\n[CLUSTER FORECAST INSTRUCTION — REQUIRED:\n` +
           `The cohort was segmented into ${nClusters} groups via ${algorithm} clustering.\n` +
-          `Below are the exact entity IDs for each cluster (use these IN lists — do NOT join CLUSTERING_RESULTS):\n` +
-          `${clusterLines}\n` +
-          `You MUST produce a SEPARATE 13-week forecast for EACH cluster.\n` +
-          `For EACH cluster output a section header "### Cluster <N> — <LABEL>" followed by:\n` +
+          `Cluster assignments:\n${summaryLines}\n\n` +
+          `Cluster assignments are stored in CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS\n` +
+          `(columns: RECORD_ID VARCHAR, CLUSTER_ID NUMBER, CLUSTER_LABEL VARCHAR).\n\n` +
+          `Include the following CTE verbatim at the top of EVERY SQL query you write:\n` +
+          `  WITH cluster_assignments AS (\n` +
+          `    SELECT RECORD_ID, CLUSTER_ID, CLUSTER_LABEL\n` +
+          `    FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS\n` +
+          `  )\n\n` +
+          `Join to it using: ${joinCond}\n` +
+          `Filter each cluster with: ca.CLUSTER_ID = <N>\n\n` +
+          `You MUST produce a SEPARATE 13-week forecast for EACH cluster (IDs 0 through ${nClusters - 1}).\n` +
+          `For EACH cluster output a section header "### Cluster <N> — <CLUSTER_LABEL>" followed by:\n` +
           `  1. A validation table: Week | Actual Claims | Predicted Claims | Error %\n` +
           `  2. A forecast table:   Week | Predicted Claims | 80% CI Lower | 80% CI Upper\n` +
-          `Apply the cluster IN list filter when querying time-series data for that cluster.\n` +
           `Do NOT combine clusters into a single aggregate forecast.]`,
-        );
-      } else if (opts.clusterInfo) {
-        const { nClusters, algorithm } = opts.clusterInfo;
-        parts.push(
-          `\n\n[Context: The cohort was previously segmented into ${nClusters} clusters via ${algorithm}. ` +
-          `Generate a separate 13-week forecast for each cluster if possible.]`,
         );
       }
       break;
