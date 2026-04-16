@@ -664,14 +664,48 @@ export class RouteDispatcher {
           .reverse()
           .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
           ?.content;
-        // If a clustering run preceded this forecast, include cluster context
-        // so the agent generates per-cluster forecasts scoped to CLUSTERING_RESULTS.
+        const isForecastIntent = /^FORECAST_/.test(intent) || intent === 'FORECAST_COMPARE' as string;
+        // If a clustering run preceded this forecast, fetch per-cluster record IDs
+        // from CLUSTERING_RESULTS and pass them as explicit IN lists.
+        // This bypasses the CLUSTERING_RESULTS JOIN via Cortex Analyst (which can't
+        // access that table since it's not in the semantic model).  With IN lists,
+        // Cortex Analyst only touches semantic model tables and the filter is injected
+        // directly into each cluster's query by the forecast agent.
         const clusterInfo = this.context.getLastClusterMeta?.();
+        let clusterAssignments: Record<number, { label: string; recordIds: string[] }> | undefined;
+        if (clusterInfo && isForecastIntent) {
+          try {
+            const assignSQL = `
+              SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, ARRAY_AGG(RECORD_ID) AS RECORD_IDS
+              FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+              GROUP BY CLUSTER_ID
+              ORDER BY CLUSTER_ID`;
+            const assignResult = await executeSQL(assignSQL, SNOWFLAKE_ROLE, signal);
+            if (assignResult.rowCount > 0) {
+              clusterAssignments = {};
+              for (const row of assignResult.rows) {
+                const cid = Number(row['CLUSTER_ID'] ?? row['cluster_id']);
+                const lbl = String(row['CLUSTER_LABEL'] ?? row['cluster_label'] ?? `Cluster ${cid}`);
+                const ids = row['RECORD_IDS'] ?? row['record_ids'];
+                const idArr: string[] = Array.isArray(ids)
+                  ? ids.map(String)
+                  : typeof ids === 'string'
+                    ? JSON.parse(ids) as string[]
+                    : [];
+                clusterAssignments[cid] = { label: lbl, recordIds: idArr };
+              }
+              console.log(`[FORECAST] Fetched cluster assignments: ${Object.entries(clusterAssignments).map(([k, v]) => `Cluster ${k}: ${v.recordIds.length} records`).join(', ')}`);
+            }
+          } catch (err) {
+            console.warn('[FORECAST] Could not fetch cluster assignments from CLUSTERING_RESULTS:', err instanceof Error ? err.message : String(err));
+          }
+        }
         const enriched = enrichMessage(message, intent, {
           priorSQL: lastSQL ?? undefined,
           priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
           clusterInfo: clusterInfo ?? undefined,
+          clusterAssignments,
         });
         const agentMessages = this.buildAgentMessages(enriched);
 
