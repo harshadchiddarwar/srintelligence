@@ -28,6 +28,8 @@ export interface ChatMessage {
   segmentData?: Record<string, unknown>;
   /** Raw narrative text from the clustering agent — preserved so the component can extract z-scores */
   clusterNarrative?: string;
+  /** Raw narrative text from the Meta Tree agent — rendered by MTreeArtifact */
+  mTreeNarrative?: string;
 }
 
 export interface AgentActivity {

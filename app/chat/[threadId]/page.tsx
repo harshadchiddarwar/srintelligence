@@ -381,6 +381,7 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     segmentData:        segmentData,
     // Preserve raw narrative text so SegmentationArtifact can extract z-scores client-side
     clusterNarrative:   isCluster ? (resp.narrative ?? undefined) : undefined,
+    mTreeNarrative:     isMTree   ? (resp.narrative ?? undefined) : undefined,
     suggestedFollowups: resp.suggestions ?? [],
   };
 

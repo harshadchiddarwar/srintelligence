@@ -9,6 +9,7 @@ import InlineChart from "./InlineChart";
 import FeedbackButtons from "@/src/components/chat/FeedbackButtons";
 import ForecastArtifact from "@/src/components/artifacts/ForecastArtifact";
 import SegmentationArtifact from "@/src/components/artifacts/SegmentationArtifact";
+import MTreeArtifact from "@/src/components/artifacts/MTreeArtifact";
 import type { AgentArtifact } from "@/src/types/agent";
 
 // ---------------------------------------------------------------------------
@@ -286,7 +287,20 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
         <AIAvatar />
 
         <div className="flex flex-col gap-3 flex-1 min-w-0">
-          {message.forecastData ? (
+          {message.mTreeNarrative ? (
+            <MTreeArtifact
+              artifact={{
+                id: message.id,
+                agentName: message.agentActivity?.routedTo ?? 'mtree',
+                intent: 'MTREE',
+                data: null,
+                narrative: message.mTreeNarrative,
+                createdAt: Date.now(),
+                lineageId: message.id,
+                cacheStatus: 'miss',
+              } as AgentArtifact}
+            />
+          ) : message.forecastData ? (
             <ForecastArtifact
               artifact={{
                 id: message.id,
