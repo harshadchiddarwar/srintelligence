@@ -95,8 +95,18 @@ export async function classifyIntent(params: {
   // After a CLUSTER turn, messages that mention "segment/cluster/group"
   // as nouns (not as an action verb) should go to ANALYST for Q&A,
   // not trigger a new clustering run.
+  // Exception: explicit FORECAST, CAUSAL, or MTREE requests must fall
+  // through to normal pattern matching — do NOT suppress them to ANALYST.
   // ------------------------------------------------------------------
-  if (priorIntents.some((i) => CLUSTER_INTENTS.has(i))) {
+  const FORECAST_KEYWORD_RE = /\bforecast(?:ing)?\b|\bpredict(?:ion)?\b|\bproject(?:ion)?\b/i;
+  const CAUSAL_KEYWORD_RE   = /\bcausal\b|\bdriver[s]?\b|\battribut(?:e|ion)\b|\bcontribut(?:e|ion)\b/i;
+  const MTREE_KEYWORD_RE    = /\bmtree\b|\bmeta.?tree\b|\bdecision.?tree\b/i;
+  const isOtherMLRequest =
+    FORECAST_KEYWORD_RE.test(message) ||
+    CAUSAL_KEYWORD_RE.test(message)   ||
+    MTREE_KEYWORD_RE.test(message);
+
+  if (priorIntents.some((i) => CLUSTER_INTENTS.has(i)) && !isOtherMLRequest) {
     if (!NEW_CLUSTER_REQUEST_RE.test(message)) {
       return {
         intent: 'ANALYST',
