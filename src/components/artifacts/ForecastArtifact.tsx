@@ -82,6 +82,10 @@ interface ClusterForecast {
   forecast?: ForecastRow[]
   validation?: ForecastRow[]
   metrics?: ForecastMetrics
+  /** One-sentence summary for this cluster (e.g. "declining 3.1% over 13 weeks") */
+  summary?: string
+  /** Cluster-specific model notes / caveats */
+  notes?: string[]
 }
 
 interface ForecastData {
@@ -96,6 +100,10 @@ interface ForecastData {
   summary?: string
   /** Present when the agent returned per-cluster forecasts (multi-line chart mode) */
   clusters?: ClusterForecast[]
+  /** Notes common to all clusters (e.g. model methodology) */
+  commonNotes?: string[]
+  /** Overall summary across all clusters */
+  overallSummary?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -331,16 +339,71 @@ export function parseForecastNarrative(text: string): ForecastData {
       // Extract per-cluster MAPE/MAE from the section text
       const mapeM = sectionText.match(/MAPE[^0-9]*([0-9]+\.?[0-9]*)\s*%/i)
       const maeM  = sectionText.match(/MAE[^0-9]*([0-9,]+)/i)
+
+      // Training / validation periods
+      const trainM = sectionText.match(/\*{0,2}[Tt]rained?\s+on\*{0,2}[^:]*:\s*\*{0,2}([^\n*]+)/)?.[1]?.trim()
+        ?? sectionText.match(/[Tt]raining\s+(?:period|data)[^:]*:\s*([^\n]+)/)?.[1]?.trim()
+      const valM = sectionText.match(/\*{0,2}[Vv]alidat\w+\s+on\*{0,2}[^:]*:\s*\*{0,2}([^\n*]+)/)?.[1]?.trim()
+        ?? sectionText.match(/[Vv]alidat\w+\s+(?:period|set)[^:]*:\s*([^\n]+)/)?.[1]?.trim()
+
+      // Per-cluster one-line summary (look for "Key trend:", last standalone sentence, etc.)
+      const summaryM = sectionText.match(
+        /\*{0,2}(?:Key\s+)?(?:[Tt]rend|[Ss]ummary|[Ii]nsight)[^:*]*[:*]+\s*\*{0,2}([^\n]{15,})/
+      )?.[1]?.replace(/\*+/g, '').trim()
+        ?? sectionText.match(
+          /(?:The\s+(?:model|forecast)\s+(?:projects?|shows?|predicts?|indicates?)[^.]{15,}\.)/
+        )?.[0]?.trim()
+
+      // Cluster-specific notes (look for #### Notes or #### Caveats sub-heading)
+      const clusterNotes = extractSectionBullets(
+        sectionText,
+        /#{1,4}\s*(?:Model\s+)?(?:Notes|Caveats|Observations)/i,
+      )
+
       const metrics: ForecastMetrics = {
         mape: mapeM ? parseFloat(mapeM[1]) : undefined,
         mae:  maeM  ? stripNum(maeM[1])    : undefined,
+        trainedOn: trainM,
+        validatedOn: valM,
       }
 
-      clusters.push({ clusterId, clusterName, validation: valRows.length > 0 ? valRows : undefined, forecast: fcRows.length > 0 ? fcRows : undefined, metrics })
+      clusters.push({
+        clusterId,
+        clusterName,
+        validation: valRows.length > 0 ? valRows : undefined,
+        forecast:   fcRows.length > 0  ? fcRows  : undefined,
+        metrics,
+        summary: summaryM,
+        notes: clusterNotes.length > 0 ? clusterNotes : undefined,
+      })
     }
 
     if (clusters.some(c => c.forecast && c.forecast.length > 0)) {
-      return { clusters }
+      // Extract common notes and overall summary from text outside cluster sections
+      const firstClusterIdx = clusterMatches[0].index ?? 0
+      const preamble = text.slice(0, firstClusterIdx)
+      // Text after all cluster sections (epilogue may have model notes)
+      const lastMatch = clusterMatches[clusterMatches.length - 1]
+      const lastSectionStart = (lastMatch.index ?? 0) + lastMatch[0].length
+      const epilogue = text.slice(lastSectionStart + (text.slice(lastSectionStart).indexOf('\n\n## ') >= 0
+        ? text.slice(lastSectionStart).indexOf('\n\n## ')
+        : text.length - lastSectionStart))
+
+      const commonNotes = extractSectionBullets(
+        text,
+        /^#{1,3}\s*(?:Common\s+)?Model\s+Notes?\b/im,
+      )
+
+      const overallSummaryM =
+        preamble.match(/[Ss]ummary[^:]*:\s*([^\n]{20,})/)?.[1]?.trim()
+        ?? preamble.match(/(?:The\s+(?:overall|full|cohort)[^.]{10,}\.)/)?.[0]?.trim()
+        ?? (preamble.trim().length > 30 ? preamble.trim().split(/\n\n/)[0]?.trim() : undefined)
+
+      return {
+        clusters,
+        commonNotes: commonNotes.length > 0 ? commonNotes : undefined,
+        overallSummary: overallSummaryM,
+      }
     }
     // If we got sections but no forecast rows, fall through to single-cluster parsing
   }
@@ -701,136 +764,431 @@ const CLUSTER_COLORS = [
   '#84cc16', // lime
 ]
 
-function MultiClusterForecastChart({ clusters }: { clusters: ClusterForecast[] }) {
-  // Merge all dates across clusters into one unified timeline
-  const allDates = Array.from(
-    new Set(
-      clusters.flatMap(c => [
-        ...(c.validation ?? []).map(r => r.date ?? r.week ?? r.ds ?? r.period ?? ''),
-        ...(c.forecast  ?? []).map(r => r.date ?? r.week ?? r.ds ?? r.period ?? ''),
-      ])
-    )
-  ).sort()
+// ---------------------------------------------------------------------------
+// Multi-cluster full report (5 sections)
+// ---------------------------------------------------------------------------
 
-  // Build recharts data: [{date, 'Cluster 0 Actual', 'Cluster 0 Forecast', ...}]
+function MultiClusterReport({
+  clusters,
+  commonNotes,
+  overallSummary,
+}: {
+  clusters: ClusterForecast[]
+  commonNotes?: string[]
+  overallSummary?: string
+}) {
+  const chartRef = useRef<HTMLDivElement>(null)
+  const [chartFullscreen, setChartFullscreen] = useState(false)
+
+  const fmt = (v: number | undefined) =>
+    v != null ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'
+
+  // ── Unified sorted date timeline ─────────────────────────────────────────
+  const allDates = Array.from(new Set(
+    clusters.flatMap(c => [
+      ...(c.validation ?? []).map(r => normaliseDate(r)),
+      ...(c.forecast   ?? []).map(r => normaliseDate(r)),
+    ]).filter(Boolean),
+  )).sort((a, b) => dateKey(a) - dateKey(b))
+
+  // ── Chart data: one row per date, per-cluster actuals + forecast keys ─────
   const chartData = allDates.map(date => {
     const point: Record<string, string | number | undefined> = { date }
-    for (const c of clusters) {
-      const label = c.clusterName.replace(/^###\s*/, '')
-      const valRow = c.validation?.find(r => (r.date ?? r.week ?? r.ds ?? r.period) === date)
-      const fcRow  = c.forecast?.find( r => (r.date ?? r.week ?? r.ds ?? r.period) === date)
-      if (valRow) point[`${label} Actual`]   = normaliseActuals(valRow) ?? normalisePredicted(valRow)
-      if (fcRow)  point[`${label} Forecast`] = normalisePredicted(fcRow)
+    for (let i = 0; i < clusters.length; i++) {
+      const c = clusters[i]
+      const vr = c.validation?.find(r => normaliseDate(r) === date)
+      const fr = c.forecast?.find(r => normaliseDate(r) === date)
+      point[`c${i}_act`] = vr ? (normaliseActuals(vr) ?? normalisePredicted(vr)) : undefined
+      point[`c${i}_fc`]  = fr ? normalisePredicted(fr) : undefined
     }
     return point
   })
 
-  const CHART_HEIGHT = 300
-  const CHART_MIN_WIDTH = 700
-  const scrollWidth = Math.max(CHART_MIN_WIDTH, allDates.length * 16)
-
-  // Find the boundary between validation and forecast in the timeline
-  const lastValDate = clusters
+  // Last validation date = vertical separator
+  const lastActualDate = clusters
     .flatMap(c => c.validation ?? [])
-    .map(r => r.date ?? r.week ?? r.ds ?? r.period ?? '')
-    .sort()
+    .map(r => normaliseDate(r))
+    .filter(Boolean)
+    .sort((a, b) => dateKey(a) - dateKey(b))
     .at(-1)
 
-  return (
-    <div className="flex flex-col gap-4 rounded-lg border border-gray-200 bg-white p-4">
-      <div className="text-sm font-semibold text-gray-800">Forecast by Cluster</div>
+  const CHART_HEIGHT   = 300
+  const CHART_MIN_W    = 700
+  const scrollWidth    = Math.max(CHART_MIN_W, allDates.length * 16)
 
-      <div style={{ overflowX: 'auto' }}>
-        <div style={{ width: scrollWidth, height: CHART_HEIGHT }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 40, left: 16 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 10, fill: '#6b7280' }}
-                angle={-35}
-                textAnchor="end"
-                interval="preserveStartEnd"
+  // ── Forecast table: all dates × clusters ─────────────────────────────────
+  const tableRows = allDates.map(date => {
+    const row: Record<string, number | string | undefined> = { date }
+    let anyAct = false
+    for (let i = 0; i < clusters.length; i++) {
+      const c   = clusters[i]
+      const vr  = c.validation?.find(r => normaliseDate(r) === date)
+      const fr  = c.forecast?.find(r => normaliseDate(r) === date)
+      const act = vr ? normaliseActuals(vr) : undefined
+      const pred = vr ? normalisePredicted(vr) : fr ? normalisePredicted(fr) : undefined
+      row[`c${i}_act`]  = act
+      row[`c${i}_pred`] = pred
+      if (act != null) anyAct = true
+    }
+    row._isForecast = anyAct ? undefined : 'yes'
+    return row
+  })
+
+  const downloadTableCSV = () => {
+    const headers = [
+      'Week',
+      ...clusters.flatMap(c => {
+        const n = c.clusterName.replace(/^###\s*/, '')
+        return [`${n} Actuals`, `${n} Predicted`]
+      }),
+    ]
+    const rows = tableRows.map(r => [
+      r.date,
+      ...clusters.flatMap((_, i) => [r[`c${i}_act`], r[`c${i}_pred`]]),
+    ])
+    downloadCSV(headers, rows as (string | number | undefined)[][], 'cluster_forecast.csv')
+  }
+
+  // ── Chart body (reused in normal + fullscreen) ────────────────────────────
+  const renderChart = (height: number, width: number) => (
+    <div ref={chartRef} style={{ overflowX: 'auto' }}>
+      <div style={{ minWidth: width, height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={chartData} margin={{ top: 8, right: 24, bottom: 40, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+            <XAxis
+              dataKey="date"
+              tick={{ fontSize: 10, fill: '#6b7280' }}
+              angle={-35}
+              textAnchor="end"
+              interval="preserveStartEnd"
+            />
+            <YAxis
+              tick={{ fontSize: 10, fill: '#6b7280' }}
+              tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)}
+              width={56}
+            />
+            <Tooltip
+              formatter={(value: unknown, name: unknown) => [
+                value != null ? Number(value).toLocaleString() : '—', String(name ?? '')
+              ]}
+              labelStyle={{ fontSize: 11 }}
+              contentStyle={{ fontSize: 11 }}
+            />
+            <Legend wrapperStyle={{ fontSize: 10, paddingTop: 8 }} />
+
+            {/* Background shading: actuals region (blue) + forecast region (green) */}
+            {lastActualDate && chartData.length > 1 && (
+              <>
+                <ReferenceArea
+                  x1={chartData[0].date as string}
+                  x2={lastActualDate}
+                  fill="#eff6ff"
+                  fillOpacity={0.45}
+                />
+                <ReferenceArea
+                  x1={lastActualDate}
+                  x2={chartData[chartData.length - 1].date as string}
+                  fill="#f0fdf4"
+                  fillOpacity={0.45}
+                />
+              </>
+            )}
+
+            {/* Vertical dashed separator */}
+            {lastActualDate && (
+              <ReferenceLine
+                x={lastActualDate}
+                stroke="#9ca3af"
+                strokeDasharray="4 4"
+                strokeWidth={1.5}
+                label={{ value: '← Actuals  |  Forecast →', position: 'insideTop', fontSize: 10, fill: '#6b7280', dy: -2 }}
               />
-              <YAxis
-                tick={{ fontSize: 10, fill: '#6b7280' }}
-                tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)}
-                width={52}
-              />
-              <Tooltip
-                formatter={(value: unknown, name: unknown) => [
-                  value != null ? Number(value).toLocaleString() : '—', String(name ?? '')
-                ]}
-                labelStyle={{ fontSize: 11 }}
-                contentStyle={{ fontSize: 11 }}
-              />
-              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-              {lastValDate && (
-                <ReferenceLine x={lastValDate} stroke="#9ca3af" strokeDasharray="4 4" label={{ value: 'Forecast →', position: 'insideTopRight', fontSize: 10, fill: '#9ca3af' }} />
-              )}
-              {clusters.map((c, i) => {
-                const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
-                const label = c.clusterName.replace(/^###\s*/, '')
-                return (
-                  <React.Fragment key={c.clusterId}>
-                    <Line
-                      type="monotone"
-                      dataKey={`${label} Actual`}
-                      stroke={color}
-                      strokeWidth={2}
-                      dot={false}
-                      connectNulls={false}
-                      name={`${label} (Actual)`}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey={`${label} Forecast`}
-                      stroke={color}
-                      strokeWidth={2}
-                      strokeDasharray="5 3"
-                      dot={false}
-                      connectNulls={false}
-                      name={`${label} (Forecast)`}
-                    />
-                  </React.Fragment>
-                )
-              })}
-            </ComposedChart>
-          </ResponsiveContainer>
+            )}
+
+            {/* One pair of Lines per cluster: solid thick (actual) + solid thin (forecast) */}
+            {clusters.map((c, i) => {
+              const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+              const name  = c.clusterName.replace(/^###\s*/, '')
+              return (
+                <React.Fragment key={c.clusterId}>
+                  <Line
+                    type="monotone"
+                    dataKey={`c${i}_act`}
+                    stroke={color}
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls={false}
+                    name={`${name} — Actual`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey={`c${i}_fc`}
+                    stroke={color}
+                    strokeWidth={1.25}
+                    dot={false}
+                    connectNulls={false}
+                    name={`${name} — Forecast`}
+                    opacity={0.85}
+                  />
+                </React.Fragment>
+              )
+            })}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+
+  const csvChartAction = (
+    <DownloadButton
+      onClick={() => {
+        const hdrs = ['Week', ...clusters.flatMap(c => {
+          const n = c.clusterName.replace(/^###\s*/, '')
+          return [`${n} Actual`, `${n} Forecast`]
+        })]
+        const rows = chartData.map(r => [
+          r.date,
+          ...clusters.flatMap((_, i) => [r[`c${i}_act`], r[`c${i}_fc`]]),
+        ])
+        downloadCSV(hdrs, rows as (string | number | undefined)[][], 'actuals_vs_forecast.csv')
+      }}
+      label="CSV"
+    />
+  )
+
+  const hasAnyNotes = (commonNotes?.length ?? 0) > 0 || clusters.some(c => c.notes?.length)
+  const hasInsights = !!overallSummary || clusters.some(c => c.summary || c.metrics?.mape != null)
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* ── 1. Model Performance — one row per cluster ────────────────────── */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <SectionTitle>Model Performance</SectionTitle>
+        <div className="divide-y divide-gray-100">
+          {clusters.map((c, i) => {
+            const color   = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+            const { label: relLabel, classes: relClasses } = reliabilityLabel(c.metrics?.mape)
+            const relDesc = reliabilityDescription(c.metrics?.mape)
+            const trainedOn   = c.metrics?.trainedOn
+            const validatedOn = c.metrics?.validatedOn
+            return (
+              <div key={c.clusterId} className="py-3.5 first:pt-1 last:pb-1">
+                {/* Cluster name row */}
+                <div className="flex items-center gap-2 mb-2.5">
+                  <span
+                    className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: color }}
+                  />
+                  <span className="text-sm font-semibold text-gray-800">
+                    {c.clusterName.replace(/^###\s*/, '')}
+                  </span>
+                </div>
+
+                {/* Metrics row */}
+                <div className="flex flex-wrap items-start gap-3 pl-4 mb-2">
+                  {c.metrics?.mape != null && (
+                    <MetricCard label="MAPE" value={`${c.metrics.mape.toFixed(1)}%`} sub="Mean Abs. % Error" />
+                  )}
+                  {c.metrics?.mae != null && (
+                    <MetricCard label="MAE" value={c.metrics.mae.toLocaleString()} sub="Mean Abs. Error" />
+                  )}
+                  <MetricCard
+                    label="Reliability"
+                    value={
+                      <span className={`inline-block rounded-full border px-2 py-0.5 text-xs font-semibold ${relClasses}`}>
+                        {relLabel}
+                      </span>
+                    }
+                  />
+                  {/* Interpretation inline */}
+                  <div className="flex-1 min-w-[200px] flex items-center self-stretch py-1">
+                    <p className="text-xs text-gray-600 leading-relaxed">{relDesc}</p>
+                  </div>
+                </div>
+
+                {/* Training / validation periods */}
+                {(trainedOn ?? validatedOn) && (
+                  <div className="flex flex-wrap gap-5 text-xs text-gray-500 pl-4">
+                    {trainedOn   && <span><span className="font-medium text-gray-700">Trained on:</span> {trainedOn}</span>}
+                    {validatedOn && <span><span className="font-medium text-gray-700">Validated on:</span> {validatedOn}</span>}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
 
-      {/* Per-cluster summary table */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs border-collapse">
-          <thead>
-            <tr className="border-b border-gray-200 text-left text-gray-500 uppercase tracking-wide">
-              <th className="py-2 pr-4">Cluster</th>
-              <th className="py-2 pr-4">MAPE</th>
-              <th className="py-2 pr-4">MAE</th>
-              <th className="py-2">Forecast Weeks</th>
-            </tr>
-          </thead>
-          <tbody>
-            {clusters.map((c, i) => (
-              <tr key={c.clusterId} className="border-b border-gray-100">
-                <td className="py-1.5 pr-4 font-medium" style={{ color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] }}>
-                  {c.clusterName.replace(/^###\s*/, '')}
-                </td>
-                <td className="py-1.5 pr-4 text-gray-700">
-                  {c.metrics?.mape != null ? `${c.metrics.mape.toFixed(1)}%` : '—'}
-                </td>
-                <td className="py-1.5 pr-4 text-gray-700">
-                  {c.metrics?.mae != null ? c.metrics.mae.toLocaleString() : '—'}
-                </td>
-                <td className="py-1.5 text-gray-700">
-                  {c.forecast?.length ?? 0}
-                </td>
+      {/* ── 2. Actuals vs Forecast Chart ──────────────────────────────────── */}
+      {allDates.length > 0 && (
+        <>
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <div className="flex items-center justify-between mb-3">
+              <SectionTitle>Actuals vs Forecast</SectionTitle>
+              <div className="flex items-center gap-1.5 -mt-3">
+                {csvChartAction}
+                <button
+                  onClick={() => setChartFullscreen(true)}
+                  title="Full screen"
+                  className="flex items-center justify-center w-6 h-6 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors border border-gray-200"
+                >
+                  <Maximize2 size={11} />
+                </button>
+              </div>
+            </div>
+            {renderChart(CHART_HEIGHT, scrollWidth)}
+          </div>
+
+          {chartFullscreen && (
+            <FullscreenOverlay
+              title="Actuals vs Forecast"
+              onClose={() => setChartFullscreen(false)}
+              actions={csvChartAction}
+            >
+              {renderChart(
+                Math.max(400, window.innerHeight - 160),
+                Math.max(scrollWidth, window.innerWidth - 80),
+              )}
+            </FullscreenOverlay>
+          )}
+        </>
+      )}
+
+      {/* ── 3. Summary & Key Insights ─────────────────────────────────────── */}
+      {hasInsights && (
+        <div className="rounded-lg border border-gray-200 bg-white p-4">
+          <SectionTitle>Summary &amp; Key Insights</SectionTitle>
+
+          {/* Overall summary across all clusters */}
+          {overallSummary && (
+            <p className="text-sm text-gray-700 leading-relaxed mb-4">
+              {renderInlineMarkdown(overallSummary)}
+            </p>
+          )}
+
+          {/* Per-cluster sections */}
+          <div className="space-y-4">
+            {clusters.map((c, i) => {
+              const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+              const name  = c.clusterName.replace(/^###\s*/, '')
+              const m     = c.metrics
+              if (!c.summary && m?.mape == null) return null
+              return (
+                <div key={c.clusterId}>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                    <span className="text-xs font-bold uppercase tracking-wider" style={{ color }}>{name}</span>
+                  </div>
+                  <div className="pl-4">
+                    {c.summary ? (
+                      <p className="text-sm text-gray-700 leading-relaxed">{renderInlineMarkdown(c.summary)}</p>
+                    ) : (
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        {reliabilityDescription(m?.mape)}
+                        {m?.mape != null && ` MAPE: ${m.mape.toFixed(1)}%.`}
+                        {m?.mae  != null && ` MAE: ${m.mae.toLocaleString()}.`}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── 4. Forecast Table — Week + per-cluster Actuals/Predicted ─────── */}
+      {tableRows.length > 0 && (() => {
+        const tableBody = () => (
+          <table className="min-w-full text-xs">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Week</th>
+                {clusters.map((c, i) => {
+                  const name  = c.clusterName.replace(/^###\s*/, '')
+                  const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+                  return (
+                    <React.Fragment key={i}>
+                      <th className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color }}>
+                        {name} Actuals
+                      </th>
+                      <th className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color }}>
+                        {name} Predicted
+                      </th>
+                    </React.Fragment>
+                  )
+                })}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {tableRows.map((row, rowIdx) => {
+                const isFc = row._isForecast === 'yes'
+                const isFirstFc = isFc && rowIdx > 0 && tableRows[rowIdx - 1]._isForecast !== 'yes'
+                return (
+                  <React.Fragment key={rowIdx}>
+                    {isFirstFc && (
+                      <tr>
+                        <td
+                          colSpan={1 + clusters.length * 2}
+                          className="px-3 py-1 text-[10px] font-semibold text-teal-700 bg-teal-50 border-y border-teal-100 uppercase tracking-wider"
+                        >
+                          ▶ Forecast Period
+                        </td>
+                      </tr>
+                    )}
+                    <tr className={isFc ? 'bg-teal-50/30' : rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{row.date as string}</td>
+                      {clusters.map((_, i) => (
+                        <React.Fragment key={i}>
+                          <td className="px-3 py-1.5 text-right text-gray-700">
+                            {fmt(row[`c${i}_act`] as number | undefined)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-medium text-gray-800">
+                            {fmt(row[`c${i}_pred`] as number | undefined)}
+                          </td>
+                        </React.Fragment>
+                      ))}
+                    </tr>
+                  </React.Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        )
+        return (
+          <CollapsibleTable title="Forecast" onDownloadCSV={downloadTableCSV}>
+            {tableBody()}
+          </CollapsibleTable>
+        )
+      })()}
+
+      {/* ── 5. Model Notes — common first, then per-cluster ───────────────── */}
+      {hasAnyNotes && (
+        <div className="rounded-lg border border-gray-200 bg-white p-4">
+          <SectionTitle>Model Notes</SectionTitle>
+          {(commonNotes?.length ?? 0) > 0 && (
+            <BulletList items={commonNotes!} />
+          )}
+          {clusters.map((c, i) => {
+            if (!c.notes?.length) return null
+            const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+            const name  = c.clusterName.replace(/^###\s*/, '')
+            return (
+              <div key={c.clusterId} className="mt-4">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                  <span className="text-xs font-bold uppercase tracking-wider" style={{ color }}>{name}</span>
+                </div>
+                <div className="pl-4">
+                  <BulletList items={c.notes} />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -855,11 +1213,17 @@ export default function ForecastArtifact({ artifact }: Props) {
       : parseForecastNarrative(artifact.narrative ?? '')
   ) as ForecastData
 
-  // ── Multi-cluster chart mode ───────────────────────────────────────────────
-  // When the agent returned per-cluster forecasts, render a single line chart
-  // with one line per cluster (actual + forecast). No CI bands.
+  // ── Multi-cluster report mode ──────────────────────────────────────────────
+  // When the agent returned per-cluster forecasts, render the full 5-section
+  // multi-cluster report (performance card, chart, insights, table, notes).
   if (raw.clusters && raw.clusters.length >= 2) {
-    return <MultiClusterForecastChart clusters={raw.clusters} />
+    return (
+      <MultiClusterReport
+        clusters={raw.clusters}
+        commonNotes={raw.commonNotes}
+        overallSummary={raw.overallSummary}
+      />
+    )
   }
 
   const metrics = raw.metrics ?? {}
