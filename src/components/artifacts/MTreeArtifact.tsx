@@ -206,7 +206,7 @@ function interpretationLabel(rank: number, score: number): string {
 function interpretationDetail(rank: number, feature: string, score: number, existingInterpretation?: string): string {
   if (existingInterpretation && existingInterpretation.length > 4) return existingInterpretation
   const scoreLabel = score >= 0.35 ? 'dominantly' : score >= 0.20 ? 'strongly' : score >= 0.10 ? 'moderately' : 'marginally'
-  return `${feature} ${scoreLabel} influences the outcome (importance: ${score.toFixed(2)})`
+  return `${feature} ${scoreLabel} influences the outcome`
 }
 
 function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
@@ -282,7 +282,7 @@ function VisualDecisionTree({ nodes }: { nodes: TreeNode[] }) {
             <div key={`imp-${node.feature}`} className="flex-1 min-w-0 px-1" style={{ maxWidth: 200 }}>
               <div className="flex items-center justify-between text-[10px] mb-1">
                 <span className="font-semibold" style={{ color }}>Importance</span>
-                <span className="font-mono tabular-nums text-gray-600">{node.importance.toFixed(2)}</span>
+                <span className="text-gray-600">{node.importance.toFixed(2)}</span>
               </div>
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                 <div className="h-full rounded-full" style={{ width: `${barPct}%`, background: color }} />
