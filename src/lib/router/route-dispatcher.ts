@@ -649,7 +649,11 @@ export class RouteDispatcher {
           payload: { stage: 'calling_cortex_agent', cortexAgentName: cortexRef },
         };
 
-        const lastSQL = this.context.getLastAnalystSQL?.();
+        // Use getLastAnalystResult() to get both SQL and columns so that
+        // enrichMessage can build a directive cohort constraint for FORECAST
+        // and CAUSAL intents (not just a passive SQL code-block hint).
+        const priorAnalyst = this.context.getLastAnalystResult?.();
+        const lastSQL = priorAnalyst?.sql ?? this.context.getLastAnalystSQL?.();
         // Pull the last ANALYST narrative from conversation history to give
         // downstream agents (FORECAST, CAUSAL, MTREE) cohort context.
         const lastAnalystNarrative = [...this.context.conversationHistory]
@@ -658,6 +662,7 @@ export class RouteDispatcher {
           ?.content;
         const enriched = enrichMessage(message, intent, {
           priorSQL: lastSQL ?? undefined,
+          priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
         });
         const agentMessages = this.buildAgentMessages(enriched);

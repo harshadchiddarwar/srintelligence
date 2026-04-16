@@ -255,19 +255,29 @@ export function extractNClusters(message: string): number {
  * @param priorSQL        Source SQL produced by a prior ANALYST step (optional)
  * @param priorData       Structured data key-value hints from prior steps (optional)
  */
+// Shared ID-column detector — same pattern used by buildCohortClusterSQL
+const COHORT_ID_PATTERNS = /key|_id$|^id_|^npi|gid|identifier|^id$/i;
+
 export function enrichMessage(
   message: string,
   intent: AgentIntent,
   opts: {
     priorNarrative?: string;
     priorSQL?: string;
+    /** Column names returned by the prior ANALYST step — used to identify the entity key. */
+    priorColumns?: string[];
     priorData?: Record<string, unknown>;
     nClusters?: number; // explicit cluster count override for cluster intents
   } = {},
 ): string {
   const parts: string[] = [message];
 
-  if (opts.priorSQL) {
+  // For FORECAST intents we replace the generic SQL hint with a directive cohort
+  // constraint so the agent knows it MUST scope its time-series query to the
+  // identified population.  All other intents keep the generic hint.
+  const isForecastIntent = /^FORECAST_/.test(intent) || intent === 'FORECAST_COMPARE' as string;
+
+  if (opts.priorSQL && !isForecastIntent) {
     parts.push(
       `\n\n[Context — source data SQL from prior analysis step:]\n\`\`\`sql\n${opts.priorSQL}\n\`\`\``,
     );
@@ -285,7 +295,38 @@ export function enrichMessage(
     case 'FORECAST_XGB':
     case 'FORECAST_AUTO':
     case 'FORECAST_HYBRID':
-    case 'FORECAST_COMPARE':
+    case 'FORECAST_COMPARE': {
+      // ── Cohort constraint ───────────────────────────────────────────────────
+      // If a prior analyst cohort is available, instruct the forecasting agent to
+      // restrict its time-series aggregation to exactly those entities.
+      // We surface both a CTE-ready SQL block AND a direct IN-list instruction
+      // so the agent can choose whichever form its SQL generator supports.
+      if (opts.priorSQL) {
+        const idCol = opts.priorColumns?.find(c => COHORT_ID_PATTERNS.test(c))
+          ?? opts.priorColumns?.[0];
+        const filterInstruction = idCol
+          ? `Your time-series aggregation SQL MUST include a filter restricting data to ` +
+            `entities where ${idCol} is in the cohort: ` +
+            `${idCol} IN (SELECT ${idCol} FROM _prior_cohort)`
+          : `Your time-series aggregation SQL MUST be scoped to the entities defined ` +
+            `by the cohort SQL below — do NOT query the full population.`;
+
+        // Strip semicolons and comment footers to keep the embedded SQL clean
+        const cleanSQL = opts.priorSQL
+          .replace(/--[^\n]*/g, '')
+          .replace(/;/g, '')
+          .trim();
+
+        parts.push(
+          `\n\n[COHORT CONSTRAINT — REQUIRED: This forecast must be limited to the ` +
+          `entities identified in the prior analysis step. ` +
+          `${filterInstruction}. ` +
+          `Define the cohort as a CTE named _prior_cohort using the SQL below:]\n` +
+          `\`\`\`sql\nWITH _prior_cohort AS (\n${cleanSQL}\n)\n` +
+          `SELECT ${idCol ?? '*'} FROM _prior_cohort\n\`\`\`\n` +
+          `[End cohort constraint]`,
+        );
+      }
       if (opts.priorData?.['dateCol']) {
         parts.push(`\n[Date column: ${String(opts.priorData['dateCol'])}]`);
       }
@@ -293,6 +334,7 @@ export function enrichMessage(
         parts.push(`[Value column: ${String(opts.priorData['valueCol'])}]`);
       }
       break;
+    }
 
     // CLUSTER* intents are handled directly by route-dispatcher (Option B):
     // Cortex Analyst → UDTF SELECT...TABLE()...OVER() → executeSQL() → persist.
