@@ -116,7 +116,7 @@ const AGENT_OPTIONS: AgentOption[] = [
   },
   {
     id: "mtree",
-    label: "mTree™",
+    label: "Decision Tree",
     icon: GitFork,
     color: "#fb923c",
     description: "Driver analysis & waterfall explainability",
