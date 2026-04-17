@@ -244,11 +244,13 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const isCluster = /^CLUSTER/.test(resp.intent);
   // Detect mTree intent — MTreeArtifact handles all rendering; suppress raw narrative
   const isMTree = resp.intent === 'MTREE';
+  // Detect causal intent — CausalNarrativeReport handles all rendering; suppress raw narrative
+  const isCausal = resp.intent === 'CAUSAL';
 
-  let tableData  = (!isForecast && !isCluster && analystArtifact) ? artifactToTableData(analystArtifact)
-                 : (!isForecast && !isCluster && firstArtifact)   ? artifactToTableData(firstArtifact)
+  let tableData  = (!isForecast && !isCluster && !isCausal && analystArtifact) ? artifactToTableData(analystArtifact)
+                 : (!isForecast && !isCluster && !isCausal && firstArtifact)   ? artifactToTableData(firstArtifact)
                  : undefined;
-  const chartData  = (!isForecast && !isCluster && firstArtifact) ? artifactToChartData(firstArtifact) : undefined;
+  const chartData  = (!isForecast && !isCluster && !isCausal && firstArtifact) ? artifactToChartData(firstArtifact) : undefined;
 
   // Sort tableData rows by temporal column oldest → newest (MM/DD/YY format)
   if (tableData) {
@@ -369,7 +371,7 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     role: "agent",
     // Suppress raw narrative only when the artifact component has structured data to render.
     // If forecast parsing found no rows (text-only response), show the narrative as markdown.
-    content: (isCluster || isMTree || (isForecast && forecastData != null)) ? "" : (resp.narrative || "Analysis complete."),
+    content: (isCluster || isMTree || isCausal || (isForecast && forecastData != null)) ? "" : (resp.narrative || "Analysis complete."),
     agentActivity: {
       masterAgent: "SRIntelligence™ Master Agent",
       routedTo: intentLabel[resp.intent] ?? "SRI Analytics Engine",
@@ -382,6 +384,7 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     // Preserve raw narrative text so SegmentationArtifact can extract z-scores client-side
     clusterNarrative:   isCluster ? (resp.narrative ?? undefined) : undefined,
     mTreeNarrative:     isMTree   ? (resp.narrative ?? undefined) : undefined,
+    causalNarrative:    isCausal  ? (resp.narrative ?? undefined) : undefined,
     suggestedFollowups: resp.suggestions ?? [],
   };
 

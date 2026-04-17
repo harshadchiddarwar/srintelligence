@@ -10,7 +10,16 @@ import FeedbackButtons from "@/src/components/chat/FeedbackButtons";
 import ForecastArtifact from "@/src/components/artifacts/ForecastArtifact";
 import SegmentationArtifact from "@/src/components/artifacts/SegmentationArtifact";
 import MTreeArtifact from "@/src/components/artifacts/MTreeArtifact";
+import CausalNarrativeReport, { getCausalFollowUps } from "@/src/components/artifacts/CausalNarrativeReport";
 import type { AgentArtifact } from "@/src/types/agent";
+
+// Follow-up suggestions to exclude for certain intents
+const EXCLUDED_FOLLOWUPS = new Set([
+  "Share these results with my team.",
+  "Save this as a scheduled workflow.",
+  "Which step took the longest?",
+  "Show the execution timeline.",
+]);
 
 // ---------------------------------------------------------------------------
 // AI Avatar — gradient circle, two white sparkles (large + small)
@@ -287,7 +296,9 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
         <AIAvatar />
 
         <div className="flex flex-col gap-3 flex-1 min-w-0">
-          {message.mTreeNarrative ? (
+          {message.causalNarrative ? (
+            <CausalNarrativeReport narrative={message.causalNarrative} onFollowup={onFollowup} />
+          ) : message.mTreeNarrative ? (
             <MTreeArtifact
               artifact={{
                 id: message.id,
@@ -336,31 +347,43 @@ export default function ChatMessageComponent({ message, onFollowup }: ChatMessag
             </>
           )}
 
-          {message.suggestedFollowups && message.suggestedFollowups.length > 0 && (
-            <div>
-              <div
-                className="px-1 py-1.5 flex items-center gap-2 text-xs font-medium mb-1.5"
-                style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}
-              >
-                Suggested Follow-ups
+          {(() => {
+            // For causal messages, prepend generated follow-ups to Snowflake ones
+            const snowflakeFollowups = (message.suggestedFollowups ?? []).filter(f => !EXCLUDED_FOLLOWUPS.has(f));
+            const allFollowups = message.causalNarrative
+              ? (() => {
+                  const generated = getCausalFollowUps(message.causalNarrative);
+                  return [...generated, ...snowflakeFollowups.filter(f => !generated.includes(f))];
+                })()
+              : snowflakeFollowups;
+
+            if (allFollowups.length === 0) return null;
+            return (
+              <div>
+                <div
+                  className="px-1 py-1.5 flex items-center gap-2 text-xs font-medium mb-1.5"
+                  style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}
+                >
+                  Suggested Follow-ups
+                </div>
+                <div className="flex flex-col gap-1">
+                  {allFollowups.map((followup, i) => (
+                    <button
+                      key={i}
+                      onClick={() => onFollowup?.(followup)}
+                      className="text-left px-4 py-2.5 rounded-lg text-sm transition-colors hover:opacity-80"
+                      style={{
+                        color: "var(--text-primary)",
+                        background: "var(--bg-secondary)",
+                      }}
+                    >
+                      {followup}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-1">
-                {message.suggestedFollowups.map((followup, i) => (
-                  <button
-                    key={i}
-                    onClick={() => onFollowup?.(followup)}
-                    className="text-left px-4 py-2.5 rounded-lg text-sm transition-colors hover:opacity-80"
-                    style={{
-                      color: "var(--text-primary)",
-                      background: "var(--bg-secondary)",
-                    }}
-                  >
-                    {followup}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Feedback thumbs — only shown on completed agent messages */}
           <FeedbackButtons

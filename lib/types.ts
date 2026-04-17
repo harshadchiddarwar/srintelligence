@@ -30,6 +30,8 @@ export interface ChatMessage {
   clusterNarrative?: string;
   /** Raw narrative text from the Meta Tree agent — rendered by MTreeArtifact */
   mTreeNarrative?: string;
+  /** Raw narrative text from the Causal Inference agent — rendered by CausalNarrativeReport */
+  causalNarrative?: string;
 }
 
 export interface AgentActivity {
