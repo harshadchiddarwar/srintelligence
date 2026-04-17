@@ -166,6 +166,11 @@ export async function getDefaultSemanticView(
 export async function getSemanticViewById(
   viewId: string,
 ): Promise<SemanticViewRef | null> {
+  // Always honour the hardcoded fallback — it is never written to the registry
+  // and is invisible to SQL lookups, but MUST be resolvable from any module
+  // instance (Next.js App Router segments share no in-memory state).
+  if (viewId === FALLBACK_VIEW.id) return FALLBACK_VIEW;
+
   // Check all cached entries first
   for (const entry of VIEW_CACHE.values()) {
     const found = entry.views.find((v) => v.id === viewId);

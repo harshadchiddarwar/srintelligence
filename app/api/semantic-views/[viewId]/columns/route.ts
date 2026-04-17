@@ -1,4 +1,4 @@
-import { getSemanticViewById } from '../../../../../src/lib/snowflake/semantic-discovery';
+import { getSemanticViewById, discoverSemanticViews } from '../../../../../src/lib/snowflake/semantic-discovery';
 import { executeSQL } from '../../../../../src/lib/snowflake/sql-api';
 import { load as parseYaml } from 'js-yaml';
 
@@ -108,12 +108,18 @@ async function getAllowedTableNames(stageRef: StageRef, cacheKey: string): Promi
 // ---------------------------------------------------------------------------
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ viewId: string }> },
 ): Promise<Response> {
   const { viewId } = await params;
 
   try {
+    // Warm this segment's local module cache before looking up by ID.
+    // Next.js App Router segments don't share in-memory state, so the cache
+    // populated by /api/semantic-views may be in a different module instance.
+    const userRole = request.headers.get('x-user-role') ?? 'APP_SVC_ROLE';
+    await discoverSemanticViews(userRole);
+
     const view = await getSemanticViewById(viewId);
     if (!view) {
       return Response.json({ error: 'Semantic view not found' }, { status: 404 });
