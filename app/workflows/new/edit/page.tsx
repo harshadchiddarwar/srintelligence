@@ -177,7 +177,7 @@ const AGENT_GROUPS = [
       { type: "auto-cluster", label: "Auto (best fit)" },
     ],
   },
-  { type: "sri-mtree",  label: "mTree™",           icon: GitFork,   color: "#fb923c", description: "Driver analysis & waterfall explainability", algorithms: null },
+  { type: "sri-mtree",  label: "Decision Tree",     icon: GitFork,   color: "#fb923c", description: "Driver analysis & waterfall explainability", algorithms: null },
   { type: "sri-causal", label: "Causal Inference",  icon: GitPullRequestArrow, color: "#8b5cf6", description: "4-phase causal discovery pipeline", algorithms: null },
 ];
 

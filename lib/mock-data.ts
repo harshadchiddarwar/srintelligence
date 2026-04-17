@@ -307,6 +307,6 @@ export const semanticModels: SemanticModel[] = [
 export const agentPalette = [
   { type: "sri-forecast",   label: "Forecast",         icon: "📈", description: "Time-series demand forecasting (Prophet, SARIMA, XGBoost, Hybrid)" },
   { type: "sri-clustering", label: "Clustering",        icon: "🧩", description: "Unsupervised segmentation (GMM, K-Means, DBSCAN, K-Medoids, Hierarchical)" },
-  { type: "sri-mtree",      label: "mTree™",            icon: "🌳", description: "Driver analysis & waterfall explainability" },
+  { type: "sri-mtree",      label: "Decision Tree",     icon: "🌳", description: "Driver analysis & waterfall explainability" },
   { type: "sri-causal",     label: "Causal Inference",  icon: "🔬", description: "4-phase causal discovery: contribution → drivers → DML → narrative" },
 ];
