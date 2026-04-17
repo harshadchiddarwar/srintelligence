@@ -256,8 +256,9 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
   const isCluster = /^CLUSTER/.test(resp.intent);
   // Detect mTree intent — MTreeArtifact handles all rendering; suppress raw narrative
   const isMTree = resp.intent === 'MTREE';
-  // Detect causal intent — CausalNarrativeReport handles all rendering; suppress raw narrative
-  const isCausal = resp.intent === 'CAUSAL';
+  // Detect causal intent — CausalNarrativeReport handles all rendering; suppress raw narrative.
+  // Causal agents emit CAUSAL_AUTO, CAUSAL_PIPELINE, CAUSAL_NARRATIVE, CAUSAL_CONTRIBUTION, etc.
+  const isCausal = /^CAUSAL/.test(resp.intent);
 
   let tableData  = (!isForecast && !isCluster && !isCausal && analystArtifact) ? artifactToTableData(analystArtifact)
                  : (!isForecast && !isCluster && !isCausal && firstArtifact)   ? artifactToTableData(firstArtifact)
@@ -374,6 +375,12 @@ function buildAgentMessage(id: string, resp: FormattedResponse): { msg: ChatMess
     CLUSTER_COMPARE:        "SRI Clustering Comparison",
     MTREE:                  "SRI Meta Tree Analytics",
     CAUSAL:                 "SRI Causal Inference",
+    CAUSAL_AUTO:            "SRI Causal Inference",
+    CAUSAL_PIPELINE:        "SRI Causal Inference",
+    CAUSAL_CONTRIBUTION:    "SRI Causal Inference · Contribution",
+    CAUSAL_DRIVERS:         "SRI Causal Inference · Drivers",
+    CAUSAL_VALIDATION:      "SRI Causal Inference · Validation",
+    CAUSAL_NARRATIVE:       "SRI Causal Inference · Narrative",
     PIPELINE:               "SRI Multi-Agent Pipeline",
     UNKNOWN:                "SRI Analytics Engine",
   };
