@@ -3,6 +3,11 @@
 import React, { useState, useRef, useEffect, KeyboardEvent } from "react";
 import { ArrowUp, ChevronDown, ChevronRight, Database, StopCircle, Star, TrendingUp, Layers, GitFork, BarChart2, GitPullRequestArrow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { semanticTables } from "@/lib/mock-data";
+
+// Uppercase table names from the known semantic model — used as a fallback
+// filter when the Cortex Analyst YAML can't be read from the stage.
+const SEMANTIC_MODEL_TABLES = new Set(semanticTables.map(t => t.name.toUpperCase()));
 
 // ---------------------------------------------------------------------------
 // Agent + model catalogue shown in the "/" picker
@@ -139,6 +144,19 @@ interface SemanticView {
   isDefault?: boolean;
 }
 
+const CUSTOM_NAMES_KEY = "sri_custom_view_names";
+
+function loadCustomNames(): Record<string, string> {
+  try {
+    const raw = typeof window !== "undefined" ? localStorage.getItem(CUSTOM_NAMES_KEY) : null;
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function applyCustomNames(views: SemanticView[], customNames: Record<string, string>): SemanticView[] {
+  return views.map(v => customNames[v.id] ? { ...v, displayName: customNames[v.id] } : v);
+}
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
@@ -206,26 +224,35 @@ export default function ChatInput({
   // Feature column picker
   const [viewColumns, setViewColumns] = useState<string[]>([]);
   const [tableColumns, setTableColumns] = useState<{ table: string; columns: string[] }[]>([]);
+  const [modelTables, setModelTables] = useState<string[]>([]);
   const [featurePopup, setFeaturePopup] = useState(false);
   const [featureQuery, setFeatureQuery] = useState("");
   const [featureIdx, setFeatureIdx] = useState(0);
+  // Feature list tracking — used for comma-triggered re-popup
+  const [inFeatureListMode, setInFeatureListMode] = useState(false);
+  const [commaTriggered, setCommaTriggered] = useState(false);
+  const [alreadyListedFeatures, setAlreadyListedFeatures] = useState<Set<string>>(new Set());
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const featureListRef = useRef<HTMLDivElement>(null);
+  // Cursor position where the feature placeholder started — used to slice the query
+  const featureStartPosRef = useRef<number>(0);
 
   // Prompt history cycling
   const historyIdxRef = useRef(-1);
   const draftRef = useRef("");
 
-  // Fetch semantic views
+  // Fetch semantic views — apply any user-defined custom names from localStorage
   useEffect(() => {
+    const customNames = loadCustomNames();
+
     fetch("/api/semantic-views")
       .then((r) => r.json())
       .then((data: { views?: SemanticView[] }) => {
         const fetched = data.views ?? [];
         if (fetched.length > 0) {
-          setViews(fetched);
+          setViews(applyCustomNames(fetched, customNames));
           const def = fetched.find((v) => v.isDefault) ?? fetched[0];
           setSelectedViewId(def.id);
         }
@@ -233,7 +260,7 @@ export default function ChatInput({
       .catch(() => {
         const fallback: SemanticView = {
           id: "cortex_testcase",
-          displayName: "Analytics",
+          displayName: customNames["cortex_testcase"] ?? "Analytics",
           description: "Rx claims, drug reference, physicians & plan data",
           fullyQualifiedName: "CORTEX_TESTING.PUBLIC.CORTEX_TESTCASE",
           isDefault: true,
@@ -241,18 +268,39 @@ export default function ChatInput({
         setViews([fallback]);
         setSelectedViewId(fallback.id);
       });
+
+    // Re-apply custom names whenever another tab saves a rename
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== CUSTOM_NAMES_KEY) return;
+      const updated = loadCustomNames();
+      setViews(prev => applyCustomNames(
+        prev.map(v => ({ ...v, displayName: v.displayName })), // keep raw shape
+        updated,
+      ));
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
-  // Fetch columns when selected view changes
+  // Fetch columns when selected view changes — filter by modelTables if available
   useEffect(() => {
     if (!selectedViewId) return;
     fetch(`/api/semantic-views/${selectedViewId}/columns`)
       .then((r) => r.json())
-      .then((data: { columns?: string[]; tableColumns?: { table: string; columns: string[] }[] }) => {
-        setViewColumns(data.columns ?? []);
-        setTableColumns(data.tableColumns ?? []);
+      .then((data: { columns?: string[]; tableColumns?: { table: string; columns: string[] }[]; modelTables?: string[] }) => {
+        const allowed = data.modelTables ?? [];
+        const rawTableCols = data.tableColumns ?? [];
+        // Filter to model tables: prefer the YAML-derived list from the API;
+        // fall back to the known semantic model table names from mock-data.
+        const allowedSet = allowed.length > 0
+          ? new Set(allowed.map((t: string) => t.toUpperCase()))
+          : SEMANTIC_MODEL_TABLES;
+        const filteredTableCols = rawTableCols.filter(tc => allowedSet.has(tc.table.toUpperCase()));
+        setModelTables(allowed);
+        setTableColumns(filteredTableCols);
+        setViewColumns(filteredTableCols.flatMap(t => t.columns));
       })
-      .catch(() => { setViewColumns([]); setTableColumns([]); });
+      .catch(() => { setViewColumns([]); setTableColumns([]); setModelTables([]); });
   }, [selectedViewId]);
 
   useEffect(() => {
@@ -294,42 +342,62 @@ export default function ChatInput({
     setSlashTwoPopup(false);
     setInModelMenu(false);
     setFeaturePopup(false);
+    setCommaTriggered(false);
   };
 
-  // Build a flat list of {col, table} items for the feature picker, filtered by featureQuery
+  // Build a flat list of {col, table} items for the feature picker.
+  // Excludes already-listed features (populated after the first column is chosen).
   // Groups are preserved from tableColumns; fall back to flat viewColumns if tableColumns is empty.
-  const filteredColumnItems: { col: string; table: string }[] = featureQuery
-    ? viewColumns
-        .filter((c) => c.toLowerCase().includes(featureQuery.toLowerCase()))
-        .map((col) => {
-          const grp = tableColumns.find((t) => t.columns.includes(col));
-          return { col, table: grp?.table ?? '' };
-        })
-    : tableColumns.length > 0
+  const filteredColumnItems: { col: string; table: string }[] = (() => {
+    // Build the full cross-table list first, then apply the search filter.
+    // This preserves each column's originating table (avoiding duplicate keys when
+    // the same column name exists in multiple tables, e.g. MARKET_CODE).
+    const all: { col: string; table: string }[] = tableColumns.length > 0
       ? tableColumns.flatMap((t) => t.columns.map((col) => ({ col, table: t.table })))
       : viewColumns.map((col) => ({ col, table: '' }));
+
+    const base: { col: string; table: string }[] = featureQuery
+      ? all.filter((item) => item.col.toLowerCase().includes(featureQuery.toLowerCase()))
+      : all;
+    // After comma trigger, hide features already added to the list
+    return alreadyListedFeatures.size > 0
+      ? base.filter(item => !alreadyListedFeatures.has(item.col.toUpperCase()))
+      : base;
+  })();
 
   // Legacy flat list (used by scroll-into-view logic)
   const filteredColumns = filteredColumnItems.map((x) => x.col);
 
-  /** Insert a column name, replacing the currently selected [feature...] bracket */
+  /** Insert a column name, replacing the current bracket placeholder or typed filter text */
   const insertColumn = (col: string) => {
     const el = textareaRef.current;
     if (!el) return;
     const text = el.value;
-    const selStart = el.selectionStart;
+    let selStart = el.selectionStart;
     const selEnd = el.selectionEnd;
 
-    // Replace the current bracket selection with the column name
-    const newText = text.slice(0, selStart) + col + text.slice(selEnd);
+    if (commaTriggered) {
+      // Remove partial text typed after the comma
+      if (featureQuery) selStart = selStart - featureQuery.length;
+    } else {
+      // Replace from the recorded placeholder/dot-dot start position to the cursor.
+      // This removes both the original placeholder text and any filter text typed.
+      selStart = featureStartPosRef.current;
+    }
+
+    const newText = text.slice(0, Math.max(0, selStart)) + col + text.slice(selEnd);
     setValue(newText);
     setFeaturePopup(false);
     setFeatureQuery("");
+    setCommaTriggered(false);
+    // Track this column as already listed and enter feature-list mode
+    setInFeatureListMode(true);
+    setAlreadyListedFeatures(prev => new Set([...prev, col.toUpperCase()]));
 
     // Place cursor after the inserted column
     requestAnimationFrame(() => {
       if (!textareaRef.current) return;
-      const pos = selStart + col.length;
+      const pos = Math.max(0, selStart) + col.length;
       textareaRef.current.focus();
       textareaRef.current.setSelectionRange(pos, pos);
     });
@@ -360,6 +428,7 @@ export default function ChatInput({
 
     // Show feature popup when landing on a feature placeholder
     if (isFeaturePlaceholder(next.text)) {
+      featureStartPosRef.current = next.start; // record where typing will replace from
       setFeaturePopup(true);
       setFeatureQuery("");
       setFeatureIdx(0);
@@ -417,22 +486,58 @@ export default function ChatInput({
     setValue(newVal);
     historyIdxRef.current = -1; // exit history cycling on any typing
 
-    // Close feature popup when text changes (user typed manually)
+    // Update feature picker when it's open or detect comma trigger
+    const el = textareaRef.current;
     if (featurePopup) {
-      // Update the filter query based on what's inside the current bracket
-      const el = textareaRef.current;
       if (el) {
         const cursor = el.selectionEnd;
         const before = newVal.slice(0, cursor);
-        const openIdx = before.lastIndexOf("[");
-        if (openIdx !== -1) {
-          const typed = before.slice(openIdx + 1);
+        if (commaTriggered) {
+          // Query = text after the last comma before cursor
+          const lastComma = before.lastIndexOf(',');
+          const typed = lastComma !== -1 ? before.slice(lastComma + 1).trimStart() : '';
           setFeatureQuery(typed);
           setFeatureIdx(0);
         } else {
-          setFeaturePopup(false);
+          // Query = everything the user has typed since the placeholder start position.
+          // Using a fixed start position (not bracket search) so typing replaces the
+          // placeholder without immediately closing the popup.
+          const startPos = featureStartPosRef.current;
+          if (cursor >= startPos) {
+            setFeatureQuery(newVal.slice(startPos, cursor));
+            setFeatureIdx(0);
+          } else {
+            // Cursor moved before the start — user backspaced past origin, close popup
+            setFeaturePopup(false);
+            setCommaTriggered(false);
+          }
         }
       }
+    } else if (inFeatureListMode && el) {
+      // Comma trigger: re-open popup when user types "," (with optional space) after a column
+      const cursor = el.selectionEnd;
+      const before = newVal.slice(0, cursor);
+      const trimmedBefore = before.trimEnd();
+      if (trimmedBefore.endsWith(',')) {
+        setFeaturePopup(true);
+        setCommaTriggered(true);
+        setFeatureQuery('');
+        setFeatureIdx(0);
+        return; // don't run the "//" or "/" checks below
+      }
+    }
+
+    if (newVal.endsWith("..")) {
+      // ".." shortcut — open feature list popup (works regardless of template)
+      const cursor = el?.selectionEnd ?? newVal.length;
+      featureStartPosRef.current = cursor - 2; // will replace the ".." on insert
+      setFeaturePopup(true);
+      setCommaTriggered(false);
+      setFeatureQuery('');
+      setFeatureIdx(0);
+      setAgentPopup(false);
+      setSlashTwoPopup(false);
+      return;
     }
 
     if (newVal.endsWith("//")) {
@@ -474,30 +579,16 @@ export default function ChatInput({
         return;
       }
       if (e.key === "Tab") {
-        // Insert selected column then advance to next placeholder
         e.preventDefault();
-        const col = filteredColumns[featureIdx];
-        const el = textareaRef.current;
-        if (!el) return;
-        const text = el.value;
-        const selStart = el.selectionStart;
-        const selEnd = el.selectionEnd;
-        const newText = text.slice(0, selStart) + col + text.slice(selEnd);
-        setValue(newText);
-        setFeaturePopup(false);
-        setFeatureQuery("");
-        requestAnimationFrame(() => {
-          if (!textareaRef.current) return;
-          textareaRef.current.value = newText;
-          const pos = selStart + col.length;
-          textareaRef.current.setSelectionRange(pos, pos);
-          cycleToNextPlaceholder({ preventDefault: () => {} });
-        });
+        insertColumn(filteredColumns[featureIdx]);
         return;
       }
       if (e.key === "Escape") {
         e.preventDefault();
         setFeaturePopup(false);
+        setCommaTriggered(false);
+        setInFeatureListMode(false);
+        setAlreadyListedFeatures(new Set());
         return;
       }
     }
@@ -593,12 +684,17 @@ export default function ChatInput({
     draftRef.current = "";
     onSubmit(trimmed);
     setValue("");
+    setInFeatureListMode(false);
+    setCommaTriggered(false);
+    setAlreadyListedFeatures(new Set());
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
   const selectedView = views.find((v) => v.id === selectedViewId);
   const isStreaming = disabled && !!onAbort;
   const currentAgent = AGENT_OPTIONS[agentIdx];
+  // Show the ".." feature list hint when a feature-based agent is active
+  const showFeatureHint = /(@Clustering|@Forecast\/XGBoost)/i.test(value);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -727,9 +823,9 @@ export default function ChatInput({
         >
           <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
             <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
-              Available columns
+              Feature List
               <span className="ml-1.5 font-normal" style={{ color: "var(--text-muted)" }}>
-                ({filteredColumnItems.length}{featureQuery ? ` of ${viewColumns.length}` : ""})
+                ({filteredColumnItems.length}{featureQuery ? ` of ${viewColumns.length - alreadyListedFeatures.size}` : alreadyListedFeatures.size > 0 ? ` remaining` : ""})
               </span>
             </p>
             <p style={{ fontSize: "10px", color: "var(--text-muted)" }}>
@@ -776,7 +872,7 @@ export default function ChatInput({
                 }
                 items.push(
                   <button
-                    key={`${item.table}-${item.col}`}
+                    key={`${item.table}-${item.col}-${i}`}
                     data-feature-idx={i}
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors"
                     style={{
@@ -901,21 +997,37 @@ export default function ChatInput({
 
       {/* Help text ────────────────────────────────────────────────────────── */}
       {!isStreaming && (
-        <div className="flex items-center gap-4 px-1" style={{ color: "var(--text-muted)" }}>
-          <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
-            <kbd
-              className="px-1 py-0.5 rounded text-xs font-mono"
-              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
-            >/</kbd>
-            <span>select agent &amp; model</span>
-          </span>
+        <div className="flex items-center gap-x-4 gap-y-1 px-1 flex-wrap" style={{ color: "var(--text-muted)" }}>
+          {/* Fixed four hints — always visible */}
           <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
             <kbd
               className="px-1 py-0.5 rounded text-xs font-mono"
               style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
             >//</kbd>
-            <span>select semantic model</span>
+            <span>semantic model</span>
           </span>
+          <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
+            <kbd
+              className="px-1 py-0.5 rounded text-xs font-mono"
+              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
+            >/</kbd>
+            <span>agent &amp; model</span>
+          </span>
+          <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
+            <kbd
+              className="px-1 py-0.5 rounded text-xs font-mono"
+              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
+            >Enter</kbd>
+            <span>execute</span>
+          </span>
+          <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
+            <kbd
+              className="px-1 py-0.5 rounded text-xs font-mono"
+              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
+            >⇧ Enter</kbd>
+            <span>plan</span>
+          </span>
+          {/* Contextual hints — appear only when relevant */}
           {findPlaceholders(value).length > 0 && (
             <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
               <kbd
@@ -923,6 +1035,15 @@ export default function ChatInput({
                 style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
               >Tab</kbd>
               <span>next field</span>
+            </span>
+          )}
+          {showFeatureHint && (
+            <span className="flex items-center gap-1" style={{ fontSize: "11px" }}>
+              <kbd
+                className="px-1 py-0.5 rounded text-xs font-mono"
+                style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: "10px" }}
+              >..</kbd>
+              <span>feature list</span>
             </span>
           )}
         </div>

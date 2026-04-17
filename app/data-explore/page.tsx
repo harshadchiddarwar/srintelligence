@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Search, BookOpen, Database, ChevronDown, Loader2 } from "lucide-react";
+import { Search, BookOpen, Database, ChevronDown, Loader2, Pencil, Check } from "lucide-react";
+
+const CUSTOM_NAMES_KEY = "sri_custom_view_names";
 import ERDiagram from "@/components/data-explore/ERDiagram";
 import ChatInput from "@/components/chat/ChatInput";
 import { semanticTables, businessRules } from "@/lib/mock-data";
@@ -83,7 +85,7 @@ function TableDetail({ table }: { table: SemanticTable }) {
               key={col.name}
               style={{ borderBottom: i < displayCols.length - 1 ? "1px solid var(--border)" : "none" }}
             >
-              <td className="px-4 py-2 font-mono font-semibold" style={{ color: "var(--text-primary)" }}>
+              <td className="px-4 py-2 font-semibold" style={{ color: "var(--text-primary)" }}>
                 {col.name}
               </td>
               <td className="px-4 py-2" style={{ color: "var(--text-muted)" }}>
@@ -92,7 +94,7 @@ function TableDetail({ table }: { table: SemanticTable }) {
               <td className="px-4 py-2" style={{ color: "var(--text-secondary)" }}>
                 {col.description}
               </td>
-              <td className="px-4 py-2 font-mono" style={{ color: "var(--text-muted)" }}>
+              <td className="px-4 py-2" style={{ color: "var(--text-muted)" }}>
                 {col.samples}
               </td>
             </tr>
@@ -125,7 +127,38 @@ export default function DataExplorePage() {
   const [activeViewId, setActiveViewId] = useState<string>("");
   const [selectedTable, setSelectedTable] = useState<string>("rx-table");
   const [searchQuery, setSearchQuery] = useState("");
+  const [customNames, setCustomNames] = useState<Record<string, string>>({});
+  const [editingViewId, setEditingViewId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  // Load persisted custom names from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_NAMES_KEY);
+      if (raw) setCustomNames(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }, []);
+
+  const getDisplayName = (view: SemanticView) =>
+    customNames[view.id] ?? view.displayName;
+
+  const startEditing = (view: SemanticView) => {
+    setEditDraft(getDisplayName(view));
+    setEditingViewId(view.id);
+    setTimeout(() => nameInputRef.current?.select(), 0);
+  };
+
+  const commitEdit = (viewId: string) => {
+    const trimmed = editDraft.trim();
+    if (trimmed) {
+      const updated = { ...customNames, [viewId]: trimmed };
+      setCustomNames(updated);
+      try { localStorage.setItem(CUSTOM_NAMES_KEY, JSON.stringify(updated)); } catch { /* ignore */ }
+    }
+    setEditingViewId(null);
+  };
 
   // Fetch real semantic views from Snowflake on mount
   useEffect(() => {
@@ -252,16 +285,51 @@ export default function DataExplorePage() {
               />
             </div>
           ) : (
-            /* Single view — show as a badge instead of a dropdown */
+            /* Single view — show as a badge with an inline-editable name */
             <div
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium group"
               style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
             >
-              <Database size={12} style={{ color: "#111111" }} />
-              {activeView?.displayName ?? "Analytics"}
-              <span className="text-xs ml-1" style={{ color: "var(--text-muted)" }}>
-                {activeView?.fullyQualifiedName ?? ""}
-              </span>
+              <Database size={12} style={{ color: "#111111", flexShrink: 0 }} />
+              {activeView && editingViewId === activeView.id ? (
+                <>
+                  <input
+                    ref={nameInputRef}
+                    value={editDraft}
+                    onChange={e => setEditDraft(e.target.value)}
+                    onBlur={() => commitEdit(activeView.id)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") { e.preventDefault(); commitEdit(activeView.id); }
+                      if (e.key === "Escape") setEditingViewId(null);
+                    }}
+                    className="outline-none bg-transparent text-sm font-medium"
+                    style={{ color: "var(--text-primary)", minWidth: 60, width: `${Math.max(editDraft.length, 4)}ch` }}
+                  />
+                  <button
+                    onMouseDown={e => { e.preventDefault(); commitEdit(activeView.id); }}
+                    className="flex items-center justify-center w-4 h-4 rounded transition-colors hover:bg-black/10"
+                    title="Save"
+                  >
+                    <Check size={11} style={{ color: "var(--accent)" }} />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span>{activeView ? getDisplayName(activeView) : "Analytics"}</span>
+                  <span className="text-xs ml-1" style={{ color: "var(--text-muted)" }}>
+                    {activeView?.fullyQualifiedName ?? ""}
+                  </span>
+                  {activeView && (
+                    <button
+                      onClick={() => startEditing(activeView)}
+                      className="flex items-center justify-center w-4 h-4 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/10 ml-0.5"
+                      title="Rename model"
+                    >
+                      <Pencil size={10} style={{ color: "var(--text-muted)" }} />
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -292,7 +360,7 @@ export default function DataExplorePage() {
             style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}
           >
             <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-              {activeView?.displayName ?? "Analytics"}
+              {activeView ? getDisplayName(activeView) : "Analytics"}
             </span>
             <span className="text-xs px-2 py-0.5 rounded-full ml-1" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
               {activeTables.length} tables

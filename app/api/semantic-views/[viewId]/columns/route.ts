@@ -185,9 +185,11 @@ export async function GET(
 
     const columns = tableColumns.flatMap((t) => t.columns);
 
-    return Response.json({ columns, tableColumns });
+    // Expose which tables are actually in the semantic model YAML so the
+    // client can filter the picker to only show model-relevant tables.
+    return Response.json({ columns, tableColumns, modelTables: allowedTables });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return Response.json({ error: message, columns: [], tableColumns: [] }, { status: 500 });
+    return Response.json({ error: message, columns: [], tableColumns: [], modelTables: [] }, { status: 500 });
   }
 }

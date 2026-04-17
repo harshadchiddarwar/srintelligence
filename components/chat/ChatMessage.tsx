@@ -115,8 +115,7 @@ function UserBubble({
   }, [editing]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content).catch(() => {
-      // Fallback for non-secure contexts
+    const fallback = () => {
       try {
         const el = document.createElement("textarea");
         el.value = message.content;
@@ -127,7 +126,13 @@ function UserBubble({
         document.execCommand("copy");
         document.body.removeChild(el);
       } catch { /* ignore */ }
-    });
+    };
+
+    if (navigator.clipboard && window.isSecureContext) {
+      void navigator.clipboard.writeText(message.content).catch(fallback);
+    } else {
+      fallback();
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
