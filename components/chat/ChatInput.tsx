@@ -38,7 +38,7 @@ interface AgentOption {
 const AGENT_OPTIONS: AgentOption[] = [
   {
     id: "analyst",
-    label: "Analytics",
+    label: "Analyst",
     icon: BarChart2,
     color: "#2891DA",
     description: "Natural language → SQL via SRI Analytics Engine",
