@@ -126,37 +126,38 @@ export const ROUTE_PATTERNS: RoutePattern[] = [
   },
   {
     // Negative lookahead (?!\/) ensures @Causal/Contribution etc. are NOT matched here.
-    pattern: /@Causal(?!\/)\b/i,
+    // @CI is accepted as a short-form alias for @Causal.
+    pattern: /@(?:Causal|CI)(?!\/)\b/i,
     intent: 'CAUSAL_AUTO',
     priority: 110,
     description: 'Explicit: Causal inference (auto)',
   },
   {
-    pattern: /@Causal\/Contribution\b/i,
+    pattern: /@(?:Causal|CI)\/Contribution\b/i,
     intent: 'CAUSAL_CONTRIBUTION',
     priority: 110,
     description: 'Explicit: Causal contribution analysis',
   },
   {
-    pattern: /@Causal\/Drivers\b/i,
+    pattern: /@(?:Causal|CI)\/Drivers\b/i,
     intent: 'CAUSAL_DRIVERS',
     priority: 110,
     description: 'Explicit: Causal driver identification',
   },
   {
-    pattern: /@Causal\/Validation\b/i,
+    pattern: /@(?:Causal|CI)\/Validation\b/i,
     intent: 'CAUSAL_VALIDATION',
     priority: 110,
     description: 'Explicit: Causal assumption validation',
   },
   {
-    pattern: /@Causal\/Narrative\b/i,
+    pattern: /@(?:Causal|CI)\/Narrative\b/i,
     intent: 'CAUSAL_NARRATIVE',
     priority: 110,
     description: 'Explicit: Causal narrative generation',
   },
   {
-    pattern: /@Causal\/Pipeline\b/i,
+    pattern: /@(?:Causal|CI)\/Pipeline\b/i,
     intent: 'CAUSAL_PIPELINE',
     priority: 110,
     description: 'Explicit: Full causal inference pipeline',

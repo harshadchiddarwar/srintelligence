@@ -127,7 +127,7 @@ const AGENT_OPTIONS: AgentOption[] = [
     label: "Causal Inference",
     icon: GitPullRequestArrow,
     color: "#8b5cf6",
-    description: "4-phase causal discovery & DML",
+    description: "4-phase causal discovery & DML  ·  alias: @CI",
     tag: "@Causal",
   },
 ];
