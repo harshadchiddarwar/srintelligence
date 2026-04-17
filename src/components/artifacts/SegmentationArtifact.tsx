@@ -913,6 +913,103 @@ export function fromV2ClusterData(data: Record<string, unknown>): SegmentationDa
 }
 
 // ---------------------------------------------------------------------------
+// deriveSegmentName — generate a marketable segment label from z-scores
+//
+// Called when Snowflake returns a generic label ("Segment N" / "Cluster N").
+// Picks the feature with the highest absolute z-score and maps it to a
+// human-readable, business-friendly descriptor.
+// ---------------------------------------------------------------------------
+
+/** Return true when a label is just a generic "Segment N" / "Cluster N". */
+function isGenericLabel(label: string): boolean {
+  return /^(?:Segment|Cluster)\s+\d+$/i.test(label.trim());
+}
+
+/**
+ * Produce a marketable segment name from z-score profile.
+ *
+ * Strategy:
+ *   1. Rank features by |z-score|.
+ *   2. Map the top feature to a business descriptor (high vs. low).
+ *   3. When two strong drivers exist, combine them into a compound name.
+ */
+function deriveSegmentName(
+  id: number,
+  zScores: Record<string, number>,
+  totalSegments: number,
+): string {
+  // Per-feature human-readable descriptors (high / low direction)
+  const FEATURE_MAP: Record<string, { high: string; low: string }> = {
+    TOTAL_CLAIMS:        { high: "High-Volume",         low: "Low-Activity"       },
+    CLAIM_COUNT:         { high: "High-Volume",         low: "Low-Activity"       },
+    BRAND_CLAIMS:        { high: "Brand Champions",     low: "Generic Preferrers" },
+    GENERIC_CLAIMS:      { high: "Generic-Focused",     low: "Brand-Oriented"     },
+    AVG_OOP:             { high: "High Cost-Share",     low: "Low Cost-Share"     },
+    PRIMARY_PATIENT_PAY: { high: "High Cost-Share",     low: "Low Cost-Share"     },
+    AVG_DAYS_SUPPLY:     { high: "Long-Term",           low: "Short-Course"       },
+    DAYS_SUPPLY:         { high: "Long-Term",           low: "Short-Course"       },
+    UNIQUE_DRUGS:        { high: "Broad Prescribers",   low: "Focused Specialists"},
+    UNIQUE_PATIENTS:     { high: "High Reach",          low: "Niche"              },
+    TOTAL_PATIENTS:      { high: "High Reach",          low: "Niche"              },
+    PATIENT_COUNT:       { high: "High Reach",          low: "Niche"              },
+    NEW_PATIENTS:        { high: "Early Adopters",      low: "Established Base"   },
+    NEW_TO_BRAND:        { high: "Early Adopters",      low: "Established Base"   },
+    MARKET_SHARE:        { high: "Market Leaders",      low: "Emerging"           },
+    BRAND_SHARE:         { high: "Brand Leaders",       low: "Emerging"           },
+    ADHERENCE:           { high: "High Adherence",      low: "Low Adherence"      },
+    REFILL_RATE:         { high: "Loyal Patients",      low: "Low Retention"      },
+    PERSISTENCE:         { high: "Loyal Patients",      low: "Low Retention"      },
+    NRX:                 { high: "Active Initiators",   low: "Low New Rx"         },
+    TRX:                 { high: "High Prescribers",    low: "Infrequent Writers" },
+    SPECIALTY_COUNT:     { high: "Multi-Specialty",     low: "Single-Specialty"   },
+    TOTAL_SPEND:         { high: "High Spend",          low: "Cost Conscious"     },
+    AVG_COPAY:           { high: "High Copay",          low: "Low Copay"          },
+  };
+
+  // Generic feature name → readable label (fallback for unmapped columns)
+  function featureLabel(col: string, isHigh: boolean): string {
+    const norm = col.toUpperCase();
+    const mapped = FEATURE_MAP[norm];
+    if (mapped) return isHigh ? mapped.high : mapped.low;
+    // Strip common aggregation prefixes then title-case
+    const clean = col
+      .replace(/^(avg|total|count|sum|num|pct|unique|max|min)_/i, "")
+      .replace(/_/g, " ")
+      .trim();
+    const titled = clean.replace(/\b\w/g, (c) => c.toUpperCase());
+    return isHigh ? `High ${titled}` : `Low ${titled}`;
+  }
+
+  // Sort features by |z-score| descending, keep only meaningful signals (|z| > 0.4)
+  const ranked = Object.entries(zScores)
+    .filter(([, z]) => !isNaN(z) && Math.abs(z) > 0.4)
+    .sort(([, a], [, b]) => Math.abs(b) - Math.abs(a));
+
+  if (ranked.length === 0) {
+    // All z-scores near zero → this is the "average" segment
+    const ordinals = ["Mainstream", "Balanced", "Core", "Standard", "Typical"];
+    return ordinals[id % ordinals.length] + " Prescribers";
+  }
+
+  const [top1, z1] = ranked[0];
+  const primary = featureLabel(top1, z1 > 0);
+
+  // Compound name when a second strong driver exists
+  if (ranked.length > 1) {
+    const [top2, z2] = ranked[1];
+    if (Math.abs(z2) > 0.7 && top2 !== top1) {
+      const secondary = featureLabel(top2, z2 > 0);
+      // Avoid redundant combinations like "High-Volume High-Volume"
+      if (!primary.toLowerCase().startsWith(secondary.toLowerCase().split(" ")[0].toLowerCase())) {
+        return `${primary} · ${secondary}`;
+      }
+    }
+  }
+
+  return primary;
+}
+
+// ---------------------------------------------------------------------------
 // fromResultTable — parse the Snowflake clustering result table
 //
 // Column schema:  RECORD_ID | CLUSTER_ID | CLUSTER_LABEL | CLUSTER_PROBABILITY
@@ -1108,7 +1205,7 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     const rawLabel  = labelRow ? String(labelRow[ciClusterLabel]) : "";
     // Strip leading "Segment N: " or "Cluster N: " prefix
     const nameMatch = rawLabel.match(/^(?:Segment|Cluster)\s+\d+\s*[:\-–—]\s*(.+)$/i);
-    const name      = nameMatch?.[1]?.trim() || rawLabel || `Segment ${id}`;
+    const parsedName = nameMatch?.[1]?.trim() || rawLabel || "";
 
     const avgValues: Record<string, number> = {};
     const zScores: Record<string, number>   = {};
@@ -1126,6 +1223,12 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
         if (typeof featureData.z_score === "number") zScores[feat]   = featureData.z_score;
       }
     }
+
+    // Use a marketable derived name when Snowflake returns a generic label
+    const nSegs = Object.keys(clusterProfiles).length;
+    const name = (!parsedName || isGenericLabel(parsedName))
+      ? deriveSegmentName(id, zScores, nSegs)
+      : parsedName;
 
     const topDriverZ = profile["_TOP_DRIVER_ZSCORE"];
     const topDriverLabel = topDriver
@@ -1152,7 +1255,13 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
       const pct  = totalRecords > 0 ? (size / totalRecords) * 100 : 0;
       const rawLabel  = ciClusterLabel >= 0 ? String(clRows[0][ciClusterLabel]) : "";
       const nameMatch = rawLabel.match(/^(?:Segment|Cluster)\s+\d+\s*[:\-–—]\s*(.+)$/i);
-      const name      = nameMatch?.[1]?.trim() || rawLabel || `Segment ${id}`;
+      const parsedName = nameMatch?.[1]?.trim() || rawLabel || "";
+      // No z-scores available in fallback path — use size rank as a proxy signal
+      const sizeRank = size / (totalRecords || 1);
+      const fallbackZ: Record<string, number> = { SIZE: sizeRank > 0.4 ? 1.5 : sizeRank < 0.15 ? -1.5 : 0 };
+      const name = (!parsedName || isGenericLabel(parsedName))
+        ? deriveSegmentName(id, fallbackZ, grouped.size)
+        : parsedName;
       segments.push({ id, name, size, pct, characteristics: [], avgValues: {}, description: undefined });
     }
     segments.sort((a, b) => a.id - b.id);
