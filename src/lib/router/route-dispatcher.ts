@@ -345,6 +345,35 @@ function buildCohortClusterSQL(priorSQL: string, priorColumns: string[]): string
 }
 
 /**
+ * Extract column names explicitly listed by the user in a clustering prompt.
+ * Handles patterns like:
+ *   "using features: TOTAL_CLAIMS, AVG_OOP, UNIQUE_DRUGS"
+ *   "features: [TOTAL_CLAIMS, AVG_OOP]"
+ *   "cluster on TOTAL_CLAIMS, AVG_OOP and UNIQUE_DRUGS"
+ * Returns an empty array when no features are detected.
+ */
+function extractUserFeatures(message: string): string[] {
+  // Pattern 1: "features: col1, col2, ..." (with optional brackets)
+  const featuresKeyword = message.match(/features\s*:\s*\[?([^\]\n]+)\]?/i);
+  if (featuresKeyword) {
+    return featuresKeyword[1]
+      .split(/,\s*/)
+      .map(f => f.trim().replace(/[[\]]/g, ''))
+      .filter(f => f.length > 0 && !/^and$/i.test(f));
+  }
+  // Pattern 2: "cluster on/using col1, col2 and col3"
+  const clusterOn = message.match(/cluster(?:ing)?\s+(?:on|using)\s+([A-Z_][A-Z0-9_,\s]+?)(?:\s+into|\s+for|\.|$)/i);
+  if (clusterOn) {
+    const candidates = clusterOn[1]
+      .split(/,\s*|\s+and\s+/i)
+      .map(f => f.trim())
+      .filter(f => /^[A-Z_][A-Z0-9_]{2,}$/i.test(f)); // looks like a column name
+    if (candidates.length >= 2) return candidates;
+  }
+  return [];
+}
+
+/**
  * Build a Cortex Analyst question that asks for a clustering input query.
  *
  * The analyst must produce a standalone SELECT with exactly 2 columns:
@@ -366,6 +395,21 @@ function buildClusterInputQuestion(message: string, nClusters: number, priorUser
     ? `\n\n[Context: The user previously analysed the following population — apply the same filters when selecting RECORD_IDs: "${priorUserQuestion.slice(0, 400)}"]\n`
     : '';
 
+  // If the user named specific features, generate an explicit OBJECT_CONSTRUCT hint
+  // so Cortex Analyst cannot ignore them or default to a single-column fallback.
+  const userFeatures = extractUserFeatures(message);
+  const featureRule = userFeatures.length > 0
+    ? `  - REQUIRED: The OBJECT_CONSTRUCT MUST include ALL of these user-specified features (map each to the appropriate aggregate): ${userFeatures.join(', ')}`
+    : `  - Include AT LEAST 5 diverse numeric features in OBJECT_CONSTRUCT — do NOT default to TOTAL_CLAIMS alone; add AVG_OOP, AVG_DAYS_SUPPLY, UNIQUE_DRUGS, UNIQUE_PATIENTS or equivalent metrics available in the schema`;
+
+  const featuresExample = userFeatures.length > 0
+    ? userFeatures.slice(0, 5).map(f => `           '${f}', <aggregate of ${f}>::FLOAT`).join(',\n')
+    : `           'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT,
+           'AVG_OOP',         AVG(primary_patient_pay)::FLOAT,
+           'AVG_DAYS_SUPPLY', AVG(product_days_supply)::FLOAT,
+           'UNIQUE_DRUGS',    COUNT(DISTINCT drug_id)::FLOAT,
+           'UNIQUE_PATIENTS', COUNT(DISTINCT patient_gid)::FLOAT`;
+
   return `${message}${cohortSection}
 
 Generate a SELECT query for clustering that returns EXACTLY 2 columns (no others):
@@ -377,11 +421,7 @@ Generate a SELECT query for clustering that returns EXACTLY 2 columns (no others
 Full example of the required format:
   SELECT physician_key::VARCHAR AS RECORD_ID,
          OBJECT_CONSTRUCT(
-           'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT,
-           'AVG_OOP',         AVG(primary_patient_pay)::FLOAT,
-           'AVG_DAYS_SUPPLY', AVG(product_days_supply)::FLOAT,
-           'UNIQUE_DRUGS',    COUNT(DISTINCT drug_id)::FLOAT,
-           'UNIQUE_PATIENTS', COUNT(DISTINCT patient_gid)::FLOAT
+${featuresExample}
          )::VARIANT AS FEATURES
   FROM   CORTEX_TESTING.PUBLIC.RX_TABLE
   WHERE  (ptd_final_claim = 1 OR ptd_final_claim IS NULL)
@@ -398,6 +438,7 @@ Strict rules:
   - Filter NULLs for all critical metric columns in the WHERE clause
   - HAVING COUNT(*) >= 5 to exclude sparse records
   - LIMIT 10000 rows maximum (keeps UDTF runtime under 2 minutes)
+${featureRule}
   - ${nHint}`;
 }
 
@@ -1015,15 +1056,24 @@ export class RouteDispatcher {
     let inputQuery: string;
 
     const priorAnalyst = this.context.getLastAnalystResult?.();
+    const userFeatures = extractUserFeatures(message);
     if (priorAnalyst?.sql && priorAnalyst.columns.length > 0) {
       console.log(`[CLUSTER] Prior cohort detected (${priorAnalyst.columns.length} cols). Building RECORD_ID+FEATURES from prior SQL directly.`);
       const cohortSQL = buildCohortClusterSQL(priorAnalyst.sql, priorAnalyst.columns);
-      if (cohortSQL) {
+
+      // Only use PATH 1A when the prior result yields enough feature diversity.
+      // A single-column result (e.g. just TOTAL_CLAIMS from a "list physicians" query)
+      // is not a useful feature set — fall through to PATH 1B so Cortex Analyst can
+      // generate a richer multi-feature query.
+      const priorFeatureCols = (priorAnalyst.columns ?? []).filter(
+        c => !/key|_id$|^id_|^npi|gid|identifier|code$|name|desc|label|date|year|month|quarter|day|state|type|category|status|flag/i.test(c),
+      );
+      const minFeatures = userFeatures.length > 0 ? 1 : 3; // if user specified features, trust PATH 1A; otherwise need ≥3
+      if (cohortSQL && priorFeatureCols.length >= minFeatures) {
         console.log(`[CLUSTER] Cohort SQL (first 300): ${cohortSQL.slice(0, 300)}`);
         inputQuery = cohortSQL;
       } else {
-        console.log(`[CLUSTER] Could not derive cohort SQL — falling back to Cortex Analyst.`);
-        // Fall through to PATH 1B below
+        console.log(`[CLUSTER] Prior cohort has only ${priorFeatureCols.length} feature col(s) — falling back to Cortex Analyst for richer feature set.`);
         inputQuery = '';
       }
     } else {
