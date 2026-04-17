@@ -926,87 +926,103 @@ function isGenericLabel(label: string): boolean {
 }
 
 /**
- * Produce a marketable segment name from z-score profile.
+ * Produce a marketable segment name from z-score profile and segment size.
  *
  * Strategy:
- *   1. Rank features by |z-score|.
- *   2. Map the top feature to a business descriptor (high vs. low).
- *   3. When two strong drivers exist, combine them into a compound name.
+ *   1. Filter out categorical / administrative columns (names, genders, codes, etc.)
+ *      — these produce nonsensical "High Name" / "Low Gender" labels.
+ *   2. Among the remaining numeric-metric features, pick the one with the
+ *      highest |z-score| and map it to a business descriptor.
+ *   3. When no meaningful numeric feature survives the filter, fall back to
+ *      size-rank names ("Market Leaders", "Core Group", "Emerging Segment").
  */
 function deriveSegmentName(
   id: number,
   zScores: Record<string, number>,
   totalSegments: number,
+  sizePct?: number,           // this segment's share of total records (0–100)
+  sizeRankAsc?: number,       // 0 = smallest segment, totalSegments-1 = largest
 ): string {
-  // Per-feature human-readable descriptors (high / low direction)
+
+  // ── Columns that must NOT drive naming ──────────────────────────────────────
+  // Categorical / administrative fields whose z-scores have no business meaning.
+  const SKIP_NAMING = /
+    _name$|_names$|^name_|_org_|
+    _gender$|_sex$|
+    _ethnicity$|_ethinicity$|_race$|
+    _state$|_city$|_zip$|_region$|_territory$|
+    _code$|_type$|_flag$|_status$|_category$|
+    _label$|_desc$|_description$|
+    _id$|^id_|_npi$|_gid$|_key$|
+    specialty|provider_type
+  /xi;
+
+  // ── Known pharma metric → directional business descriptor ───────────────────
   const FEATURE_MAP: Record<string, { high: string; low: string }> = {
-    TOTAL_CLAIMS:        { high: "High-Volume",         low: "Low-Activity"       },
-    CLAIM_COUNT:         { high: "High-Volume",         low: "Low-Activity"       },
-    BRAND_CLAIMS:        { high: "Brand Champions",     low: "Generic Preferrers" },
-    GENERIC_CLAIMS:      { high: "Generic-Focused",     low: "Brand-Oriented"     },
-    AVG_OOP:             { high: "High Cost-Share",     low: "Low Cost-Share"     },
-    PRIMARY_PATIENT_PAY: { high: "High Cost-Share",     low: "Low Cost-Share"     },
-    AVG_DAYS_SUPPLY:     { high: "Long-Term",           low: "Short-Course"       },
-    DAYS_SUPPLY:         { high: "Long-Term",           low: "Short-Course"       },
-    UNIQUE_DRUGS:        { high: "Broad Prescribers",   low: "Focused Specialists"},
-    UNIQUE_PATIENTS:     { high: "High Reach",          low: "Niche"              },
-    TOTAL_PATIENTS:      { high: "High Reach",          low: "Niche"              },
-    PATIENT_COUNT:       { high: "High Reach",          low: "Niche"              },
-    NEW_PATIENTS:        { high: "Early Adopters",      low: "Established Base"   },
-    NEW_TO_BRAND:        { high: "Early Adopters",      low: "Established Base"   },
-    MARKET_SHARE:        { high: "Market Leaders",      low: "Emerging"           },
-    BRAND_SHARE:         { high: "Brand Leaders",       low: "Emerging"           },
-    ADHERENCE:           { high: "High Adherence",      low: "Low Adherence"      },
-    REFILL_RATE:         { high: "Loyal Patients",      low: "Low Retention"      },
-    PERSISTENCE:         { high: "Loyal Patients",      low: "Low Retention"      },
-    NRX:                 { high: "Active Initiators",   low: "Low New Rx"         },
-    TRX:                 { high: "High Prescribers",    low: "Infrequent Writers" },
-    SPECIALTY_COUNT:     { high: "Multi-Specialty",     low: "Single-Specialty"   },
-    TOTAL_SPEND:         { high: "High Spend",          low: "Cost Conscious"     },
-    AVG_COPAY:           { high: "High Copay",          low: "Low Copay"          },
+    TOTAL_CLAIMS:        { high: "High-Volume Prescribers",  low: "Low-Activity Prescribers" },
+    CLAIM_COUNT:         { high: "High-Volume Prescribers",  low: "Low-Activity Prescribers" },
+    BRAND_CLAIMS:        { high: "Brand Champions",          low: "Generic Preferrers"       },
+    BRAND_SHARE:         { high: "Brand Leaders",            low: "Emerging Brand Users"     },
+    GENERIC_CLAIMS:      { high: "Generic-Focused",          low: "Brand-Oriented"           },
+    AVG_OOP:             { high: "High Cost-Share",          low: "Low Cost-Share"           },
+    PRIMARY_PATIENT_PAY: { high: "High Cost-Share",          low: "Low Cost-Share"           },
+    AVG_COPAY:           { high: "High Copay",               low: "Low Copay"                },
+    COPAY:               { high: "High Copay",               low: "Low Copay"                },
+    COPAY_30_DAYS:       { high: "High Copay",               low: "Low Copay"                },
+    AVG_DAYS_SUPPLY:     { high: "Long-Term Writers",        low: "Short-Course Writers"     },
+    DAYS_SUPPLY:         { high: "Long-Term Writers",        low: "Short-Course Writers"     },
+    UNIQUE_DRUGS:        { high: "Broad-Portfolio Writers",  low: "Focused Specialists"      },
+    UNIQUE_PATIENTS:     { high: "High-Reach Practitioners", low: "Niche Specialists"        },
+    TOTAL_PATIENTS:      { high: "High-Reach Practitioners", low: "Niche Specialists"        },
+    PATIENT_COUNT:       { high: "High-Reach Practitioners", low: "Niche Specialists"        },
+    NEW_PATIENTS:        { high: "Early Adopters",           low: "Established Base"         },
+    NEW_TO_BRAND:        { high: "Early Adopters",           low: "Established Base"         },
+    MARKET_SHARE:        { high: "Market Leaders",           low: "Emerging Players"         },
+    ADHERENCE:           { high: "High-Adherence Patients",  low: "Low-Adherence Patients"   },
+    REFILL_RATE:         { high: "Loyal Patients",           low: "Low Retention"            },
+    PERSISTENCE:         { high: "Loyal Patients",           low: "Low Retention"            },
+    NRX:                 { high: "Active Initiators",        low: "Infrequent Initiators"    },
+    TRX:                 { high: "High-Volume Writers",      low: "Infrequent Writers"       },
+    TOTAL_SPEND:         { high: "High Spend",               low: "Cost Conscious"           },
+    PLAN_COUNT:          { high: "Multi-Plan",               low: "Single-Plan"              },
   };
 
-  // Generic feature name → readable label (fallback for unmapped columns)
-  function featureLabel(col: string, isHigh: boolean): string {
-    const norm = col.toUpperCase();
-    const mapped = FEATURE_MAP[norm];
-    if (mapped) return isHigh ? mapped.high : mapped.low;
-    // Strip common aggregation prefixes then title-case
-    const clean = col
-      .replace(/^(avg|total|count|sum|num|pct|unique|max|min)_/i, "")
-      .replace(/_/g, " ")
-      .trim();
-    const titled = clean.replace(/\b\w/g, (c) => c.toUpperCase());
-    return isHigh ? `High ${titled}` : `Low ${titled}`;
-  }
-
-  // Sort features by |z-score| descending, keep only meaningful signals (|z| > 0.4)
-  const ranked = Object.entries(zScores)
-    .filter(([, z]) => !isNaN(z) && Math.abs(z) > 0.4)
+  // ── Filter to meaningful numeric metric features only ──────────────────────
+  const meaningful = Object.entries(zScores)
+    .filter(([col]) => !SKIP_NAMING.test(col))
+    .filter(([, z]) => !isNaN(z) && Math.abs(z) > 0.5)
     .sort(([, a], [, b]) => Math.abs(b) - Math.abs(a));
 
-  if (ranked.length === 0) {
-    // All z-scores near zero → this is the "average" segment
-    const ordinals = ["Mainstream", "Balanced", "Core", "Standard", "Typical"];
-    return ordinals[id % ordinals.length] + " Prescribers";
+  if (meaningful.length > 0) {
+    const [topCol, topZ] = meaningful[0];
+    const norm = topCol.toUpperCase();
+    const mapped = FEATURE_MAP[norm];
+    if (mapped) return topZ > 0 ? mapped.high : mapped.low;
+
+    // Unmapped but still a numeric metric — strip aggregation prefixes, title-case
+    const clean = topCol
+      .replace(/^(avg|total|count|sum|num|pct|unique|max|min)_/i, "")
+      .replace(/_/g, " ")
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+    return topZ > 0 ? `High ${clean}` : `Low ${clean}`;
   }
 
-  const [top1, z1] = ranked[0];
-  const primary = featureLabel(top1, z1 > 0);
-
-  // Compound name when a second strong driver exists
-  if (ranked.length > 1) {
-    const [top2, z2] = ranked[1];
-    if (Math.abs(z2) > 0.7 && top2 !== top1) {
-      const secondary = featureLabel(top2, z2 > 0);
-      // Avoid redundant combinations like "High-Volume High-Volume"
-      if (!primary.toLowerCase().startsWith(secondary.toLowerCase().split(" ")[0].toLowerCase())) {
-        return `${primary} · ${secondary}`;
-      }
-    }
+  // ── Size-rank fallback when no numeric metric is discriminating ─────────────
+  // Gives meaningful labels based on how large this segment is relative to others.
+  if (sizeRankAsc !== undefined) {
+    const isLargest  = sizeRankAsc === totalSegments - 1;
+    const isSmallest = sizeRankAsc === 0;
+    if (isLargest)  return sizePct && sizePct > 50 ? "Core Group"       : "Market Leaders";
+    if (isSmallest) return sizePct && sizePct < 5  ? "Niche Segment"    : "Emerging Segment";
+    // Middle segments
+    const midNames = ["Developing Group", "Growing Segment", "Mainstream Group"];
+    return midNames[id % midNames.length];
   }
 
-  return primary;
+  // Ultimate fallback — ordinal
+  const ordinals = ["Core Group", "Emerging Segment", "Developing Group", "Mainstream Group", "Niche Segment"];
+  return ordinals[id % ordinals.length];
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,10 +1208,18 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
   // ── Build segments from cluster_profiles in MODEL_METADATA
   const segments: SegmentProfile[] = [];
   const clusterProfiles = modelMeta.cluster_profiles ?? {};
+  const nSegs = Object.keys(clusterProfiles).length;
+
+  // Pre-compute size rankings so deriveSegmentName can use them as a fallback
+  const clusterSizes = modelMeta.cluster_sizes ?? {};
+  const sizesSorted = Object.entries(clusterSizes)
+    .map(([k, v]) => ({ id: k, size: Number(v) }))
+    .sort((a, b) => a.size - b.size); // ascending → index 0 = smallest
+  const sizeRankMap = new Map(sizesSorted.map((s, i) => [s.id, i]));
 
   for (const [clusterIdStr, profile] of Object.entries(clusterProfiles)) {
     const id   = parseInt(clusterIdStr);
-    const size = modelMeta.cluster_sizes?.[clusterIdStr] ?? 0;
+    const size = clusterSizes[clusterIdStr] ?? 0;
     const pct  = totalRecords > 0 ? (size / totalRecords) * 100 : 0;
 
     // Get the human-readable label from the first matching row
@@ -1225,9 +1249,9 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
     }
 
     // Use a marketable derived name when Snowflake returns a generic label
-    const nSegs = Object.keys(clusterProfiles).length;
+    const sizeRankAsc = sizeRankMap.get(clusterIdStr) ?? id;
     const name = (!parsedName || isGenericLabel(parsedName))
-      ? deriveSegmentName(id, zScores, nSegs)
+      ? deriveSegmentName(id, zScores, nSegs, pct, sizeRankAsc)
       : parsedName;
 
     const topDriverZ = profile["_TOP_DRIVER_ZSCORE"];
@@ -1249,6 +1273,12 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key)!.push(row);
     }
+    // Pre-compute size rankings for fallback naming
+    const groupedSizesSorted = Array.from(grouped.entries())
+      .map(([k, rows]) => ({ k, size: rows.length }))
+      .sort((a, b) => a.size - b.size);
+    const fallbackRankMap = new Map(groupedSizesSorted.map((s, i) => [s.k, i]));
+
     for (const [key, clRows] of grouped) {
       const id   = parseInt(key);
       const size = clRows.length;
@@ -1256,11 +1286,10 @@ export function fromResultTable(data: Record<string, unknown>): SegmentationData
       const rawLabel  = ciClusterLabel >= 0 ? String(clRows[0][ciClusterLabel]) : "";
       const nameMatch = rawLabel.match(/^(?:Segment|Cluster)\s+\d+\s*[:\-–—]\s*(.+)$/i);
       const parsedName = nameMatch?.[1]?.trim() || rawLabel || "";
-      // No z-scores available in fallback path — use size rank as a proxy signal
-      const sizeRank = size / (totalRecords || 1);
-      const fallbackZ: Record<string, number> = { SIZE: sizeRank > 0.4 ? 1.5 : sizeRank < 0.15 ? -1.5 : 0 };
+      // No z-scores in fallback path — rely entirely on size rank
+      const sizeRankAsc = fallbackRankMap.get(key) ?? id;
       const name = (!parsedName || isGenericLabel(parsedName))
-        ? deriveSegmentName(id, fallbackZ, grouped.size)
+        ? deriveSegmentName(id, {}, grouped.size, pct, sizeRankAsc)
         : parsedName;
       segments.push({ id, name, size, pct, characteristics: [], avgValues: {}, description: undefined });
     }
