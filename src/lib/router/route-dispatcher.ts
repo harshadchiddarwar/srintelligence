@@ -345,6 +345,102 @@ function buildCohortClusterSQL(priorSQL: string, priorColumns: string[]): string
 }
 
 /**
+ * Count the number of key-value pairs inside a SQL OBJECT_CONSTRUCT(...) call.
+ * Handles both single-line and multi-line OBJECT_CONSTRUCT bodies.
+ * Returns 0 if no OBJECT_CONSTRUCT is found.
+ */
+function countObjectConstructKeys(sql: string): number {
+  const m = sql.match(/OBJECT_CONSTRUCT\s*\(([\s\S]*?)\)\s*(?:::\s*VARIANT)?/i);
+  if (!m) return 0;
+  // Each key is a quoted string literal — count them
+  return (m[1].match(/'[^']+'/g) ?? []).length;
+}
+
+/**
+ * Detect the entity key that will become RECORD_ID.
+ * Returns the column name (e.g. "physician_key", "patient_gid") or null.
+ */
+function detectEntityKey(sql: string): string | null {
+  // Match: <col>::VARCHAR AS RECORD_ID   OR   CAST(<col> AS VARCHAR) AS RECORD_ID
+  const cast1 = sql.match(/(\w+)\s*::\s*VARCHAR\s+AS\s+RECORD_ID/i);
+  if (cast1) return cast1[1];
+  const cast2 = sql.match(/CAST\s*\(\s*(\w+)\s+AS\s+VARCHAR\s*\)\s+AS\s+RECORD_ID/i);
+  if (cast2) return cast2[1];
+  return null;
+}
+
+/**
+ * Build standard multi-feature physician/plan/patient/drug OBJECT_CONSTRUCT
+ * columns using RX_TABLE aggregates.  Used when Cortex Analyst produces a
+ * thin single-feature OBJECT_CONSTRUCT.
+ *
+ * entityKey   — column that becomes RECORD_ID (physician_key, patient_gid, …)
+ * fromClause  — FROM … (JOIN …) block from the Cortex Analyst SQL
+ * whereClause — raw WHERE predicate (may be empty string)
+ * groupByCol  — column name to GROUP BY (usually = entityKey)
+ */
+function buildStandardFeatureSQL(
+  entityKey: string,
+  fromClause: string,
+  whereClause: string,
+  groupByCol: string,
+): string {
+  // Standard analytics aggregates available on RX_TABLE
+  const features = [
+    `'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT`,
+    `'AVG_OOP',         AVG(primary_patient_pay)::FLOAT`,
+    `'AVG_PLAN_PAY',    AVG(primary_plan_pay)::FLOAT`,
+    `'UNIQUE_DRUGS',    COUNT(DISTINCT drug_id)::FLOAT`,
+    `'UNIQUE_PATIENTS', COUNT(DISTINCT patient_gid)::FLOAT`,
+    `'FILL_RATE',       AVG(CASE WHEN claim_status_code = '1' THEN 1.0 ELSE 0.0 END)::FLOAT`,
+  ].join(',\n         ');
+
+  const where = whereClause.trim()
+    ? `WHERE  ${whereClause.trim()}\n`
+    : `WHERE  (ptd_final_claim = 1 OR ptd_final_claim IS NULL)\n  AND  claim_status_code = '1'\n`;
+
+  return [
+    `SELECT ${groupByCol}::VARCHAR AS RECORD_ID,`,
+    `       OBJECT_CONSTRUCT(`,
+    `         ${features}`,
+    `       )::VARIANT AS FEATURES`,
+    `FROM   ${fromClause.trim()}`,
+    where.trimEnd(),
+    `GROUP  BY ${groupByCol}`,
+    `HAVING COUNT(claim_id) >= 5`,
+    `LIMIT  10000`,
+  ].join('\n');
+}
+
+/**
+ * Guarantee at least MIN_FEATURES features in the OBJECT_CONSTRUCT.
+ *
+ * When Cortex Analyst returns a thin query (e.g. only TOTAL_CLAIMS), we
+ * preserve the FROM / WHERE / entity key it correctly identified, and
+ * replace the feature block with our own standard 6-feature set.
+ */
+const MIN_CLUSTER_FEATURES = 3;
+
+function enrichClusterInputSQL(sql: string): string {
+  const keyCount = countObjectConstructKeys(sql);
+  if (keyCount >= MIN_CLUSTER_FEATURES) return sql; // already rich enough
+
+  console.log(`[CLUSTER] Cortex Analyst returned only ${keyCount} feature(s) in OBJECT_CONSTRUCT — enriching with standard feature set.`);
+
+  const entityKey = detectEntityKey(sql) ?? 'physician_key';
+
+  // Extract FROM clause (everything between FROM and first of WHERE/GROUP/HAVING/LIMIT)
+  const fromMatch = sql.match(/\bFROM\b\s+([\s\S]+?)(?=\bWHERE\b|\bGROUP\b|\bHAVING\b|\bLIMIT\b|$)/i);
+  const fromClause = fromMatch ? fromMatch[1].trim() : 'CORTEX_TESTING.PUBLIC.RX_TABLE';
+
+  // Extract WHERE clause (between WHERE and first of GROUP/HAVING/LIMIT)
+  const whereMatch = sql.match(/\bWHERE\b\s+([\s\S]+?)(?=\bGROUP\b|\bHAVING\b|\bLIMIT\b|$)/i);
+  const whereClause = whereMatch ? whereMatch[1].trim() : '';
+
+  return buildStandardFeatureSQL(entityKey, fromClause, whereClause, entityKey);
+}
+
+/**
  * Extract column names explicitly listed by the user in a clustering prompt.
  * Handles patterns like:
  *   "using features: TOTAL_CLAIMS, AVG_OOP, UNIQUE_DRUGS"
@@ -1070,8 +1166,10 @@ export class RouteDispatcher {
       );
       const minFeatures = userFeatures.length > 0 ? 1 : 3; // if user specified features, trust PATH 1A; otherwise need ≥3
       if (cohortSQL && priorFeatureCols.length >= minFeatures) {
-        console.log(`[CLUSTER] Cohort SQL (first 300): ${cohortSQL.slice(0, 300)}`);
-        inputQuery = cohortSQL;
+        // Even cohort-built SQL may have thin features if the prior query was narrow.
+        const enriched = enrichClusterInputSQL(cohortSQL);
+        console.log(`[CLUSTER] Cohort SQL (first 300): ${enriched.slice(0, 300)}`);
+        inputQuery = enriched;
       } else {
         console.log(`[CLUSTER] Prior cohort has only ${priorFeatureCols.length} feature col(s) — falling back to Cortex Analyst for richer feature set.`);
         inputQuery = '';
@@ -1114,6 +1212,10 @@ export class RouteDispatcher {
         return buildAgentResult('', intent, agentName, '', undefined, null, Date.now() - startMs, lineageId, errMsg);
       }
       inputQuery = analystResp.sql.trim().replace(/;\s*$/, '');
+
+      // Cortex Analyst often simplifies to a single-feature OBJECT_CONSTRUCT.
+      // Guarantee at least MIN_CLUSTER_FEATURES features by patching thin SQL.
+      inputQuery = enrichClusterInputSQL(inputQuery);
     }
 
     console.log(`[CLUSTER] Input query (first 300): ${inputQuery.slice(0, 300)}`);
