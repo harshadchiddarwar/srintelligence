@@ -946,16 +946,7 @@ function deriveSegmentName(
 
   // ── Columns that must NOT drive naming ──────────────────────────────────────
   // Categorical / administrative fields whose z-scores have no business meaning.
-  const SKIP_NAMING = /
-    _name$|_names$|^name_|_org_|
-    _gender$|_sex$|
-    _ethnicity$|_ethinicity$|_race$|
-    _state$|_city$|_zip$|_region$|_territory$|
-    _code$|_type$|_flag$|_status$|_category$|
-    _label$|_desc$|_description$|
-    _id$|^id_|_npi$|_gid$|_key$|
-    specialty|provider_type
-  /xi;
+  const SKIP_NAMING = /_name$|_names$|^name_|_org_|_gender$|_sex$|_ethnicity$|_ethinicity$|_race$|_state$|_city$|_zip$|_region$|_territory$|_code$|_type$|_flag$|_status$|_category$|_label$|_desc$|_description$|_id$|^id_|_npi$|_gid$|_key$|specialty|provider_type/i;
 
   // ── Known pharma metric → directional business descriptor ───────────────────
   const FEATURE_MAP: Record<string, { high: string; low: string }> = {
