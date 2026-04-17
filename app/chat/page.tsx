@@ -78,7 +78,7 @@ export default function ChatHome() {
       {/* Chat input pinned to bottom */}
       <div className="px-6 pb-6 max-w-4xl w-full mx-auto">
         <ChatInput
-          placeholder="▌ Ask a question about your data…"
+          placeholder="Ask a question about your data…"
           onSubmit={handleSubmit}
           autoFocus
         />

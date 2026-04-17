@@ -3,18 +3,19 @@ import { executeSQL } from '../../../../../src/lib/snowflake/sql-api';
 import { load as parseYaml } from 'js-yaml';
 
 // ---------------------------------------------------------------------------
-// Stage reference parser
+// FQN parsers — two formats are supported:
+//   Stage path : @DB.SCHEMA.STAGE/filename.yaml   (Cortex Analyst YAML in stage)
+//   Plain path : DB.SCHEMA.TABLE                  (fallback / legacy views)
 // ---------------------------------------------------------------------------
 
 interface StageRef { db: string; schema: string; stage: string; file: string }
+interface DbSchemaRef { db: string; schema: string }
 
 /**
- * Parse a Cortex Analyst semantic model FQN such as
- * `@CORTEX_TESTING.PUBLIC.STAGE_NAME/analytics_model.yaml`
- * into its constituent parts.
+ * Parse a stage-based FQN: `@CORTEX_TESTING.PUBLIC.MY_STAGE/model.yaml`
+ * Returns null for plain DB.SCHEMA.TABLE paths.
  */
 function parseStageRef(fqn: string): StageRef | null {
-  // Strip leading "@" if present
   const cleaned = fqn.startsWith('@') ? fqn.slice(1) : fqn;
   const slashIdx = cleaned.indexOf('/');
   if (slashIdx === -1) return null;
@@ -26,6 +27,19 @@ function parseStageRef(fqn: string): StageRef | null {
     stage:  parts[2].toUpperCase(),
     file:   cleaned.slice(slashIdx + 1),
   };
+}
+
+/**
+ * Parse a plain FQN: `DB.SCHEMA.VIEW` or `@DB.SCHEMA.STAGE/…`
+ * Always returns at least db + schema when there are ≥ 2 dot-separated parts.
+ */
+function parseDbSchema(fqn: string): DbSchemaRef | null {
+  const cleaned = fqn.startsWith('@') ? fqn.slice(1) : fqn;
+  // For stage paths, use the portion before the slash
+  const base = cleaned.includes('/') ? cleaned.slice(0, cleaned.indexOf('/')) : cleaned;
+  const parts = base.split('.');
+  if (parts.length < 2) return null;
+  return { db: parts[0].toUpperCase(), schema: parts[1].toUpperCase() };
 }
 
 // ---------------------------------------------------------------------------
@@ -105,19 +119,23 @@ export async function GET(
       return Response.json({ error: 'Semantic view not found' }, { status: 404 });
     }
 
-    const stageRef = parseStageRef(view.fullyQualifiedName);
-    if (!stageRef) {
+    const stageRef  = parseStageRef(view.fullyQualifiedName);
+    const dbSchema  = parseDbSchema(view.fullyQualifiedName);
+
+    if (!dbSchema) {
       return Response.json({ columns: [], tableColumns: [] });
     }
 
-    // ── 1. Discover which tables the semantic model YAML actually references ──
+    // ── 1. If this is a stage-based semantic model, read its YAML to get the
+    //       exact list of tables it references.  Falls back to all schema tables
+    //       when the YAML can't be read (plain-path views, permission errors, etc.)
     let allowedTables: string[] = [];
-    try {
-      allowedTables = await getAllowedTableNames(stageRef, view.fullyQualifiedName);
-    } catch (err) {
-      // If we can't read the YAML (permissions, network, etc.) fall through
-      // and show all tables in the schema as before.
-      console.warn('[columns] Could not read semantic model YAML — showing all schema tables:', err);
+    if (stageRef) {
+      try {
+        allowedTables = await getAllowedTableNames(stageRef, view.fullyQualifiedName);
+      } catch (err) {
+        console.warn('[columns] Could not read semantic model YAML — showing all schema tables:', err);
+      }
     }
 
     // ── 2. Query INFORMATION_SCHEMA.COLUMNS filtered to allowed tables ────────
@@ -128,8 +146,8 @@ export async function GET(
 
     const sql = `
       SELECT TABLE_NAME, COLUMN_NAME
-      FROM ${stageRef.db}.INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = '${stageRef.schema}'
+      FROM ${dbSchema.db}.INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = '${dbSchema.schema}'
         ${tableFilter}
       ORDER BY TABLE_NAME ASC, COLUMN_NAME ASC
     `;
