@@ -115,6 +115,19 @@ function deriveChart(
   const { headers, rows } = tableData;
   if (!rows.length || headers.length < 2) return null;
 
+  // Suppress chart for entity/person lists (physicians, patients, etc.) — these
+  // produce meaningless high-cardinality bar charts rather than aggregated insights.
+  const firstHeader = headers[0] ?? '';
+  const isEntityList = /first.?name|last.?name|physician|patient|doctor|hcp|npi|prescriber|provider/i.test(firstHeader);
+  if (isEntityList) return null;
+
+  // Also suppress when many rows exist and there's no temporal aggregation dimension
+  // (suggests a raw entity dump, not a summary suitable for charting).
+  const hasTemporalCol = headers.some((h) =>
+    /date|month|week|year|quarter|period|time/i.test(h)
+  );
+  if (rows.length > 30 && !hasTemporalCol) return null;
+
   // First column = label, first numeric column = value
   const valueIdx = headers.findIndex(
     (_, i) => i > 0 && rows.some((r) => typeof r[i] === "number")

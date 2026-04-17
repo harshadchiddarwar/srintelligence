@@ -195,6 +195,18 @@ function artifactToChartData(artifact: AgentArtifact): Array<{ name: string; val
     const headers = results.headers;
     const rows = results.rows;
 
+    // Suppress chart for entity/person lists (physicians, patients, etc.) — these
+    // produce meaningless high-cardinality bar charts rather than aggregated insights.
+    const firstHeader = headers[0] ?? '';
+    const isEntityList = /first.?name|last.?name|physician|patient|doctor|hcp|npi|prescriber|provider/i.test(firstHeader);
+    if (isEntityList) return undefined;
+
+    // Also suppress when many rows exist and there's no temporal aggregation dimension.
+    const hasTemporalCol = headers.some((h) =>
+      /date|month|week|year|quarter|period|ds|time/i.test(h)
+    );
+    if (rows.length > 30 && !hasTemporalCol) return undefined;
+
     // Find temporal column (date/month/period/etc.)
     const temporalIdx = headers.findIndex((h) =>
       /date|month|week|year|quarter|period|ds|time/i.test(h),
