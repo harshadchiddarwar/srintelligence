@@ -422,13 +422,29 @@ export function enrichMessage(
 
     case 'CAUSAL_CONTRIBUTION':
     case 'CAUSAL_AUTO':
+    case 'CAUSAL_DRIVERS':
+    case 'CAUSAL_PIPELINE': {
       if (opts.priorData?.['baselinePeriod']) {
         parts.push(`\n[Baseline period: ${String(opts.priorData['baselinePeriod'])}]`);
       }
       if (opts.priorData?.['targetPeriod']) {
         parts.push(`[Target period: ${String(opts.priorData['targetPeriod'])}]`);
       }
+      // When a clustering run preceded this causal request, tell the agent
+      // which population was segmented so it can scope its analysis accordingly.
+      if (opts.clusterInfo) {
+        const { nClusters, algorithm, recordIdCol } = opts.clusterInfo;
+        const entityDesc = recordIdCol
+          ? `${recordIdCol.replace(/_key$|_id$|_gid$/i, '').replace(/_/g, ' ')}s`
+          : 'records';
+        parts.push(
+          `\n\n[Context: The cohort was previously segmented into ${nClusters} clusters ` +
+          `(${algorithm}) by ${entityDesc}. ` +
+          `Please run the causal analysis on the same population.]`,
+        );
+      }
       break;
+    }
 
     case 'CAUSAL_NARRATIVE':
       if (opts.priorData?.['drivers']) {

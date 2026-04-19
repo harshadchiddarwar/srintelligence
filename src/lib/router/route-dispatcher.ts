@@ -900,7 +900,13 @@ export class RouteDispatcher {
           clusterSummary,
           clusterThresholds,
         });
-        const agentMessages = this.buildAgentMessages(enriched);
+        // Derive the intent family prefix (e.g. "CAUSAL", "FORECAST", "MTREE")
+        // so buildAgentMessages can filter out unrelated assistant turns from
+        // prior runs (e.g. clustering narrative confusing the causal agent).
+        const intentFamily = intent.includes('_')
+          ? intent.split('_')[0]
+          : intent;
+        const agentMessages = this.buildAgentMessages(enriched, intentFamily);
 
         const lineageId = randomUUID();
         console.time(`5_CORTEX_AGENT:${reqId}`);
@@ -1379,18 +1385,37 @@ const nSegmentsUsed = (parsedMeta['n_clusters'] as number | undefined) ?? nClust
 
   /**
    * Build the message array to send to a named Cortex Agent.
-   * Includes the last few assistant turns as context.
+   *
+   * @param currentMessage  The enriched user message to send now.
+   * @param intentFamily    Optional prefix (e.g. "CAUSAL", "FORECAST").
+   *                        When supplied, history turns whose `intent` belongs
+   *                        to a *different* agent family are excluded.
+   *                        This prevents e.g. a clustering narrative from
+   *                        appearing as an "assistant" message to the causal
+   *                        agent — which causes it to continue that conversation
+   *                        instead of starting a fresh analysis pipeline.
+   *                        ANALYST turns are always included as they provide
+   *                        useful data-source context for any agent.
    */
   private buildAgentMessages(
     currentMessage: string,
+    intentFamily?: string,
   ): Array<{ role: 'user' | 'assistant'; content: string }> {
     const history = this.context.conversationHistory.slice(-6);
     const agentMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
     for (const turn of history) {
-      if (turn.role === 'user' || turn.role === 'assistant') {
-        agentMessages.push({ role: turn.role, content: turn.content });
+      if (turn.role !== 'user' && turn.role !== 'assistant') continue;
+
+      // When filtering by family, drop assistant turns from other families.
+      // (User turns are always kept — they give the question context.)
+      if (intentFamily && turn.role === 'assistant' && turn.intent) {
+        const isAnalyst  = turn.intent === 'ANALYST';
+        const isSameFamily = turn.intent.startsWith(intentFamily);
+        if (!isAnalyst && !isSameFamily) continue;
       }
+
+      agentMessages.push({ role: turn.role, content: turn.content });
     }
 
     agentMessages.push({ role: 'user', content: currentMessage });
