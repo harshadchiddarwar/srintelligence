@@ -89,11 +89,21 @@ function parseNum(s: string): number {
 /**
  * Scale contribution items so their sum equals exactly (finalVal − baseline).
  * This guarantees the waterfall staircase always lands on the End bar.
+ *
+ * Guards:
+ *  - If both baseline AND finalVal are 0 the anchor points were not extracted
+ *    (e.g. the heading had no "29% → 32%" pattern).  Return items unchanged so
+ *    the chart at least shows the relative steps — scaling to 0 would zero every
+ *    bar and produce a flat empty waterfall.
+ *  - If rawSum is effectively 0 nothing to scale.
+ *  - If the gap and rawSum already agree (rounding error only) skip the scale.
  */
 function normalizeItems(items: WFItem[], baseline: number, finalVal: number): WFItem[] {
   const rawSum    = items.reduce((s, i) => s + i.contribution, 0)
+  if (Math.abs(rawSum) < 0.0001) return items           // nothing to scale
+  if (baseline === 0 && finalVal === 0) return items    // no valid anchors — use raw
   const targetGap = finalVal - baseline
-  if (rawSum === 0 || Math.abs(rawSum - targetGap) <= 0.0001) return items
+  if (Math.abs(rawSum - targetGap) <= 0.0001) return items
   const scale = targetGap / rawSum
   return items.map(i => ({ ...i, contribution: i.contribution * scale }))
 }
@@ -147,7 +157,9 @@ function detectSectionId(rawTitle: string): string | null {
 
 /** Strip "WATERFALL N: " prefix from a section title */
 function cleanTitle(rawTitle: string): string {
-  return rawTitle.replace(/^waterfall\s*\d+\s*:\s*/i, '').trim()
+  // CI agent often wraps heading text in bold markers: **WATERFALL 1: ...**
+  // Strip markdown before applying the regex so the ^ anchor works.
+  return stripMd(rawTitle).replace(/^waterfall\s*\d+\s*:\s*/i, '').trim()
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +169,7 @@ function cleanTitle(rawTitle: string): string {
 function parseReport(narrative: string): ParsedReport {
   const chunks = narrative.split(/\n(?=###\s)/g)
 
-  // Header chunk
+  // Header chunk — everything before the first ### section
   const headerChunk = chunks[0] ?? ''
   let headingTitle = ''
   const summaryLines: string[] = []
@@ -181,7 +193,21 @@ function parseReport(narrative: string): ParsedReport {
     const rawTitle = headingLine.replace(/^#{1,3}\s*/, '').trim()
     const id = detectSectionId(rawTitle)
 
-    if (id === null) continue
+    // "### Headline" (and similar intro sections) are not a waterfall/competitive
+    // section — but their body text contains the subject brand's H1→H2 share
+    // percentages ("from 29% to 32%") that anchor every waterfall chart.
+    // Capture those lines into summaryLines instead of discarding the chunk.
+    if (id === null) {
+      if (/^headline$|^summary$|^overview$|^executive/i.test(rawTitle)) {
+        for (const line of chunkLines.slice(1)) {
+          const t = line.trim()
+          if (t.length > 0 && !/^-{2,}$/.test(t) && !t.startsWith('|')) {
+            summaryLines.push(t)
+          }
+        }
+      }
+      continue
+    }
 
     // Capture monthly trend body text for use as competitive interpretation
     if (id === '__monthly_trend__') {
@@ -208,10 +234,15 @@ function parseReport(narrative: string): ParsedReport {
 
     const { headers, rows } = parseMarkdownTable(tableLines)
 
+    // Capture ALL paragraph text after the table as the interpretation block.
+    // Previously this filter required an "Interpretation:" or "Pattern:" prefix —
+    // the CI agent writes free-form paragraphs that never use those prefixes,
+    // leaving every card blank.  Strip the prefix if present; otherwise keep as-is.
+    // "Narrative:" is the prefix this agent uses most frequently.
     const interpretationText = interpLines
       .map(l => stripMd(l))
-      .filter(l => /^(Interpretation|Pattern)\s*:/i.test(l))
-      .map(l => l.replace(/^(Interpretation|Pattern)\s*:\s*/i, '').trim())
+      .filter(l => l.length > 0)
+      .map(l => l.replace(/^(Interpretation|Pattern|Note|Key\s+Insight|Narrative)\s*:\s*/i, '').trim())
       .join(' ')
 
     sections.push({ id, rawTitle, title, headers, rows, interpretation: interpretationText })
@@ -223,8 +254,22 @@ function parseReport(narrative: string): ParsedReport {
     compSec.interpretation = monthlyTrendText
   }
 
-  // Extract subject brand's H1→H2 share from heading: "(29.11% → 32.37%)"
-  const shareMatch = headingTitle.match(/([\d.]+)%\s*[→\-]+\s*([\d.]+)%/)
+  // Extract subject brand's H1→H2 share percentages.
+  //
+  // The heading line rarely contains percentages (e.g. it reads
+  // "BRAND1 Market Share Analysis: H1 vs H2 2025").  The actual values live in
+  // the ### Headline body ("market share increased from 29% to 32%") which we
+  // now capture in summaryLines above.  Search both sources in priority order.
+  const allText = [headingTitle, ...summaryLines].join(' ')
+  const shareMatch =
+    // "29.11% → 32.37%" or "29% - 32%"
+    allText.match(/([\d.]+)%\s*[→\->]+\s*([\d.]+)%/) ??
+    // "increased from 29% to 32%"
+    allText.match(/from\s+([\d.]+)%\s+to\s+([\d.]+)%/i) ??
+    // "29% in H1 … 32% in H2"
+    allText.match(/([\d.]+)%\s+(?:in|for)\s+h1.*?([\d.]+)%\s+(?:in|for)\s+h2/i) ??
+    // "H1: 29% … H2: 32%"
+    allText.match(/h1[:\s]+([\d.]+)%.*?h2[:\s]+([\d.]+)%/i)
   const shareBaseline = shareMatch ? parseFloat(shareMatch[1]) : 0
   const shareFinal    = shareMatch ? parseFloat(shareMatch[2]) : 0
 
@@ -238,28 +283,57 @@ function parseReport(narrative: string): ParsedReport {
 function buildW1Data(section: ParsedSection) {
   const { headers, rows } = section
   const hLower = headers.map(h => h.toLowerCase())
+
   const stepIdx     = hLower.findIndex(h => h.includes('step'))
-  const driverIdx   = hLower.findIndex(h => h.includes('driver'))
-  const shareImpIdx = hLower.findIndex(h => h.includes('share impact'))
-  const runningIdx  = hLower.findIndex(h => h.includes('running share'))
+  const driverIdx   = hLower.findIndex(h =>
+    h.includes('driver') || h.includes('factor') || h.includes('cause') || h.includes('description'))
+  const shareImpIdx = hLower.findIndex(h =>
+    (h.includes('share') && (h.includes('impact') || h.includes('change') || h.includes('pp'))) ||
+    h.includes('contribution'))
+  // Running/cumulative share — prefer the rightmost column whose header contains "share"
+  const runningIdx = (() => {
+    const rev = [...hLower].reverse().findIndex(h => h.includes('running') || h.includes('share'))
+    return rev >= 0 ? hLower.length - 1 - rev : hLower.length - 1
+  })()
 
   let baseline = 0, finalVal = 0
   const items: WFItem[] = []
 
-  for (const row of rows) {
-    const step   = stripMd(stepIdx  >= 0 ? (row.cells[stepIdx]  ?? '') : '')
-    const driver = driverIdx >= 0 ? (row.cells[driverIdx] ?? '') : ''
-    const impact = shareImpIdx >= 0 ? (row.cells[shareImpIdx] ?? '') : ''
-    const running = runningIdx >= 0 ? (row.cells[runningIdx] ?? '') : ''
+  // Track each row's classification so we can apply fallbacks below
+  const rowMeta: { isStart: boolean; isEnd: boolean; name: string; impact: string; running: string }[] = []
 
-    if (/^start$/i.test(step)) {
+  for (const row of rows) {
+    const step    = stripMd(stepIdx    >= 0 ? (row.cells[stepIdx]    ?? '') : (row.cells[0] ?? ''))
+    const driver  = driverIdx  >= 0 ? (row.cells[driverIdx]  ?? '') : (row.cells[Math.min(1, row.cells.length - 1)] ?? '')
+    const impact  = shareImpIdx >= 0 ? (row.cells[shareImpIdx] ?? '') : ''
+    const running = runningIdx  >= 0 ? (row.cells[runningIdx]  ?? '') : (row.cells[row.cells.length - 1] ?? '')
+
+    const isStart = /^(start|h1\b|baseline|begin|market\s+baseline|h1\s+baseline)/i.test(step)
+    const isEnd   = /^(end\b|h2\b|result|final\b|h2\s+result|end\s+result)/i.test(step)
+    const isNumeric = /^\d+\.?$/.test(step) || /^step\s*\d+$/i.test(step)
+
+    rowMeta.push({ isStart, isEnd, name: stripParens(stripMd(driver)).slice(0, 30), impact, running })
+
+    if (isStart) {
       baseline = parseNum(running)
-    } else if (/^end$/i.test(step)) {
+    } else if (isEnd) {
       finalVal = parseNum(running)
-    } else if (/^\d+$/.test(step)) {
-      // Strip parenthetical volume counts from driver name
-      const name = stripParens(stripMd(driver)).slice(0, 30)
-      items.push({ name, contribution: parseNum(impact) })
+    } else if (isNumeric) {
+      items.push({ name: rowMeta[rowMeta.length - 1].name, contribution: parseNum(impact) })
+    }
+  }
+
+  // Fallback A — start/end rows not detected by label: use first/last running-share values
+  if (baseline === 0 && rowMeta.length > 0) baseline = parseNum(rowMeta[0].running)
+  if (finalVal === 0 && rowMeta.length > 0) finalVal  = parseNum(rowMeta[rowMeta.length - 1].running)
+
+  // Fallback B — no numeric-step rows found: treat every non-start/non-end row as a contribution
+  if (items.length === 0) {
+    for (const r of rowMeta) {
+      if (!r.isStart && !r.isEnd && r.name.length > 0) {
+        const contribution = parseNum(r.impact)
+        items.push({ name: r.name, contribution })
+      }
     }
   }
 
@@ -298,73 +372,139 @@ function buildW2Data(
   brand7H2: number,
 ) {
   const { headers, rows } = section
-  const hLower    = headers.map(h => h.toLowerCase())
-  const stepIdx   = hLower.findIndex(h => h.includes('step'))
-  const payerIdx  = hLower.findIndex(h => h.includes('payer channel'))
-  const claimsIdx = hLower.findIndex(h => h.includes('claims lost'))
+  const hLower = headers.map(h => h.toLowerCase())
+
+  const stepIdx = hLower.findIndex(h => h.includes('step'))
+  // Label column: payer channel, channel, segment, driver, or factor
+  const labelIdx = hLower.findIndex(h =>
+    h.includes('payer channel') || h.includes('payer') || h.includes('channel') ||
+    h.includes('segment') || h.includes('driver') || h.includes('factor') || h.includes('description'))
+  // Prefer a "% of total loss / % of decline" column when available — these values
+  // are already proportional and scale cleanly with normalizeItems against Brand7's
+  // share anchors.  Fall back to raw volume columns when no such column exists.
+  const lossIdx = (() => {
+    const pctOf = hLower.findIndex(h => h.includes('% of') || h.includes('pct of') || h.includes('percent of'))
+    if (pctOf >= 0) return pctOf
+    return hLower.findIndex(h =>
+      h.includes('claims lost') || h.includes('volume lost') || h.includes('rx lost') ||
+      h.includes('claims change') || h.includes('volume change') || h.includes('volume impact') ||
+      h.includes('claims decline') || h.includes('volume decline') || h.includes('rx change') ||
+      h.includes('impact'))
+  })()
 
   const items: WFItem[] = []
 
+  // Row classification mirrors W1: numeric step OR (no step col) → all non-total rows
+  const hasStepCol = stepIdx >= 0
+  const rowMeta: { isTotal: boolean; name: string; loss: string }[] = []
+
   for (const row of rows) {
-    const step = stripMd(stepIdx >= 0 ? (row.cells[stepIdx] ?? '') : '')
-    if (!/^\d+$/.test(step)) continue
-    const payer  = payerIdx  >= 0 ? (row.cells[payerIdx]  ?? '') : ''
-    const claims = claimsIdx >= 0 ? (row.cells[claimsIdx] ?? '') : ''
-    const name   = stripParens(stripMd(payer)).slice(0, 22)
-    // Claims lost → negative contributions (Brand7 share declined)
-    const contribution = -Math.abs(parseNum(claims))
-    items.push({ name, contribution })
+    const step  = stripMd(stepIdx  >= 0 ? (row.cells[stepIdx]  ?? '') : (row.cells[0] ?? ''))
+    const label = labelIdx >= 0 ? (row.cells[labelIdx] ?? '') : (row.cells[Math.min(hasStepCol ? 1 : 0, row.cells.length - 1)] ?? '')
+    const loss  = lossIdx  >= 0 ? (row.cells[lossIdx]  ?? '') : ''
+
+    const isTotal   = /^total|^sum|^all\b|^overall/i.test(step) || /^total|^sum|^all\b|^overall/i.test(stripMd(label))
+    const isNumeric = /^\d+\.?$/.test(step) || /^step\s*\d+$/i.test(step)
+
+    rowMeta.push({ isTotal, name: stripParens(stripMd(label)).slice(0, 22), loss })
+
+    // Accept row when: step col exists and step is numeric, OR no step col and row isn't a total row
+    if (hasStepCol && !isNumeric) continue
+    if (isTotal) continue
+
+    const contribution = -Math.abs(parseNum(loss))  // Brand7 declined → all contributions negative
+    items.push({ name: rowMeta[rowMeta.length - 1].name, contribution })
   }
 
-  // Anchor to Brand7's actual H1→H2 share so staircase mirrors W1 style
-  const baseline = brand7H1 > 0 ? brand7H1 : items.reduce((s, i) => s + i.contribution, 0)
-  const finalVal = brand7H2 > 0 ? brand7H2 : 0
+  // Fallback: if items still empty, use all non-total rows
+  if (items.length === 0) {
+    for (const r of rowMeta) {
+      if (!r.isTotal && r.name.length > 0) {
+        items.push({ name: r.name, contribution: -Math.abs(parseNum(r.loss)) })
+      }
+    }
+  }
+
+  // Anchor to Brand7's actual H1→H2 share so staircase mirrors W1 style.
+  // When competitive-table share values are unavailable, use the total volume
+  // loss as baseline so normalizeItems gets a valid positive anchor and does
+  // not compute a negative scale factor that flips all bar directions.
+  let baseline: number
+  let finalVal: number
+  if (brand7H1 > 0) {
+    baseline = brand7H1
+    finalVal = brand7H2
+  } else {
+    const totalLoss = Math.abs(items.reduce((s, i) => s + i.contribution, 0))
+    baseline = totalLoss > 0 ? totalLoss : 1
+    finalVal = 0
+  }
   return { baseline, finalVal, items: normalizeItems(items, baseline, finalVal) }
 }
 
 function buildW3Data(section: ParsedSection, shareBaseline: number, shareFinal: number) {
   const { headers, rows } = section
-  const hLower    = headers.map(h => h.toLowerCase())
+  const hLower = headers.map(h => h.toLowerCase())
+
   const stepIdx   = hLower.findIndex(h => h.includes('step'))
-  const nameIdx   = hLower.findIndex(h => h.includes('factor') || h.includes('driver'))
-  const changeIdx = hLower.findIndex(h => h.includes('change'))
+  const nameIdx   = hLower.findIndex(h =>
+    h.includes('factor') || h.includes('driver') || h.includes('mechanism') ||
+    h.includes('cause') || h.includes('description') || h.includes('reason'))
+  const changeIdx = hLower.findIndex(h =>
+    h.includes('change') || h.includes('impact') || h.includes('contribution') || h.includes('pp'))
 
-  const items: WFItem[] = []
+  const hasStepCol = stepIdx >= 0
 
-  for (const row of rows) {
-    const step = stripMd(stepIdx >= 0 ? (row.cells[stepIdx] ?? '') : '')
-    if (!/^\d+$/.test(step)) continue
-
-    const name      = nameIdx   >= 0 ? stripMd(row.cells[nameIdx]   ?? '').slice(0, 28) : step
-    const changeRaw = changeIdx >= 0 ? stripMd(row.cells[changeIdx] ?? '') : ''
-
-    // Skip stable / unchanged rows
-    if (/^stable$|^unchanged$|^flat$/i.test(changeRaw.trim())) continue
-
-    // Extract parenthetical percentage if present: "−4,155 (−0.4%)"
+  const parseContrib = (changeRaw: string, name: string): number => {
+    if (/^stable$|^unchanged$|^flat$/i.test(changeRaw.trim())) return 0
     const parenMatch = changeRaw.match(/\(([^)]+)\)/)
-    const valStr     = parenMatch ? parenMatch[1] : changeRaw
-
+    const valStr = parenMatch ? parenMatch[1] : changeRaw
     let contribution = parseNum(valStr)
-
-    // Range value "1.8pp to 3.9pp" → average
     if (!contribution && /to/i.test(valStr)) {
       const parts = valStr.match(/[-+]?\d+\.?\d*/g)
-      if (parts && parts.length >= 2) {
-        contribution = (parseFloat(parts[0]) + parseFloat(parts[1])) / 2
-      }
+      if (parts && parts.length >= 2) contribution = (parseFloat(parts[0]) + parseFloat(parts[1])) / 2
     }
-
-    // Market denominator contraction is a POSITIVE factor for share — flip sign
-    if (/denominator|market/i.test(name) && contribution < 0) {
-      contribution = -contribution
-    }
-
-    if (contribution === 0) continue  // skip zero-bars
-    items.push({ name, contribution })
+    if (/denominator|market\s+size|market\s+contraction/i.test(name) && contribution < 0) contribution = -contribution
+    return contribution
   }
 
-  // Anchor to real subject share values so staircase bridges H1→H2 exactly
+  // Collect all candidate (name, changeRaw, contribution) tuples first
+  type Candidate = { name: string; changeRaw: string; contribution: number }
+  const candidates: Candidate[] = []
+  const fallbackCandidates: Candidate[] = []
+
+  for (const row of rows) {
+    const step      = stripMd(stepIdx >= 0 ? (row.cells[stepIdx] ?? '') : (row.cells[0] ?? ''))
+    const name      = nameIdx   >= 0 ? stripMd(row.cells[nameIdx]   ?? '').slice(0, 28) : step
+    const changeRaw = changeIdx >= 0 ? stripMd(row.cells[changeIdx] ?? '') : ''
+    const isTotal   = /^total|^sum|^net|^overall/i.test(step)
+    const isNumeric = /^\d+\.?$/.test(step) || /^step\s*\d+$/i.test(step)
+
+    if (!isTotal && name.length > 0) {
+      const contribution = parseContrib(changeRaw, name)
+      fallbackCandidates.push({ name, changeRaw, contribution })
+      if (!hasStepCol || isNumeric) {
+        candidates.push({ name, changeRaw, contribution })
+      }
+    }
+  }
+
+  const pool = candidates.length > 0 ? candidates : fallbackCandidates
+
+  // Mixed-unit detection: W3 tables often mix volume-% changes (e.g. "-3.9%") with
+  // share-pp changes (e.g. "+3.08pp").  Volume-% values are NOT additive share
+  // contributions — including them produces a nonsensical waterfall.  When the pool
+  // has both pp items and non-pp % items, keep only the pp items.
+  const hasPpItems  = pool.some(c => /\bpp\b/i.test(c.changeRaw))
+  const hasNonPpPct = pool.some(c => /%/.test(c.changeRaw) && !/\bpp\b/i.test(c.changeRaw))
+  const mixedUnits  = hasPpItems && hasNonPpPct
+
+  const items: WFItem[] = []
+  for (const c of pool) {
+    if (mixedUnits && /%/.test(c.changeRaw) && !/\bpp\b/i.test(c.changeRaw)) continue
+    if (c.contribution !== 0) items.push({ name: c.name, contribution: c.contribution })
+  }
+
   const baseline = shareBaseline > 0 ? shareBaseline : 0
   const finalVal = shareFinal    > 0 ? shareFinal    : items.reduce((s, i) => s + i.contribution, 0)
   return { baseline, finalVal, items: normalizeItems(items, baseline, finalVal) }
@@ -372,22 +512,45 @@ function buildW3Data(section: ParsedSection, shareBaseline: number, shareFinal: 
 
 function buildW4Data(section: ParsedSection, shareBaseline: number, shareFinal: number) {
   const { headers, rows } = section
-  const hLower     = headers.map(h => h.toLowerCase())
-  const rankIdx    = hLower.findIndex(h => h.includes('rank') || h.includes('step'))
-  const nameIdx    = hLower.findIndex(h => h.includes('region') || h.includes('name'))
-  const contribIdx = hLower.findIndex(h => h.includes('contribution') || h.includes('impact'))
+  const hLower = headers.map(h => h.toLowerCase())
 
+  const rankIdx    = hLower.findIndex(h => h.includes('rank') || h.includes('step'))
+  const nameIdx    = hLower.findIndex(h =>
+    h.includes('region') || h.includes('territory') || h.includes('area') ||
+    h.includes('geography') || h.includes('name') || h.includes('market'))
+  const contribIdx = hLower.findIndex(h =>
+    h.includes('contribution') || h.includes('impact') || h.includes('share change') ||
+    h.includes('change') || h.includes('pp'))
+
+  const hasRankCol = rankIdx >= 0
   const items: WFItem[] = []
+  const rowMeta: { isTotal: boolean; name: string; contribRaw: string }[] = []
 
   for (const row of rows) {
-    const rank = stripMd(rankIdx >= 0 ? (row.cells[rankIdx] ?? '') : '')
-    if (!/^\d+$/.test(rank)) continue  // skip Total row
-    const name         = nameIdx    >= 0 ? stripMd(row.cells[nameIdx]    ?? '').slice(0, 15) : rank
-    const contribution = contribIdx >= 0 ? parseNum(row.cells[contribIdx] ?? '') : 0
+    const rank     = stripMd(rankIdx >= 0 ? (row.cells[rankIdx] ?? '') : (row.cells[0] ?? ''))
+    const name     = nameIdx    >= 0 ? stripMd(row.cells[nameIdx]    ?? '').slice(0, 18) : rank
+    const contribRaw = contribIdx >= 0 ? (row.cells[contribIdx] ?? '') : ''
+    const isTotal  = /^total|^sum|^all\b|^overall/i.test(rank) || /^total|^sum/i.test(name)
+    const isNumeric = /^\d+\.?$/.test(rank) || /^step\s*\d+$/i.test(rank)
+
+    rowMeta.push({ isTotal, name, contribRaw })
+
+    if (hasRankCol && !isNumeric) continue
+    if (isTotal) continue
+
+    const contribution = parseNum(contribRaw)
     items.push({ name, contribution })
   }
 
-  // Anchor to Brand1's actual H1→H2 share so staircase mirrors W1 and W3 style
+  // Fallback: no numeric-rank rows found → use all non-total rows
+  if (items.length === 0) {
+    for (const r of rowMeta) {
+      if (!r.isTotal && r.name.length > 0) {
+        items.push({ name: r.name, contribution: parseNum(r.contribRaw) })
+      }
+    }
+  }
+
   const baseline = shareBaseline > 0 ? shareBaseline : 0
   const finalVal = shareFinal    > 0 ? shareFinal    : items.reduce((s, i) => s + i.contribution, 0)
   return { baseline, finalVal, items: normalizeItems(items, baseline, finalVal) }

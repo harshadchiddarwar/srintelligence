@@ -430,17 +430,75 @@ export function enrichMessage(
       if (opts.priorData?.['targetPeriod']) {
         parts.push(`[Target period: ${String(opts.priorData['targetPeriod'])}]`);
       }
-      // When a clustering run preceded this causal request, tell the agent
-      // which population was segmented so it can scope its analysis accordingly.
+
+      // ── Cluster context injection ─────────────────────────────────────────
+      // CLUSTERING_RESULTS is in the Snowflake semantic model (with a
+      // relationship to physician_ref via RECORD_ID = physician_key), so the
+      // CI agent's internal Cortex Analyst can resolve the subquery filter
+      // natively.  We inject the segment → label + SQL-filter mapping so the
+      // agent knows the exact CLUSTER_ID value and record counts.
       if (opts.clusterInfo) {
         const { nClusters, algorithm, recordIdCol } = opts.clusterInfo;
         const entityDesc = recordIdCol
           ? `${recordIdCol.replace(/_key$|_id$|_gid$/i, '').replace(/_/g, ' ')}s`
           : 'records';
+
+        // Build per-segment listing, preferring threshold data (has metric ranges)
+        // then summary (has labels/counts), then a plain ordinal fallback.
+        const sourceMap: Record<string, { label: string; count: number }> | undefined =
+          (opts.clusterThresholds ?? opts.clusterSummary) as Record<string, { label: string; count: number }> | undefined;
+
+        // Scope SQL filters to the specific run so physician counts are exact.
+        // Without RUN_ID the IN-subquery spans all historical runs, returning
+        // tens of thousands of IDs instead of the actual ~192 in this run.
+        const runIdFilter = opts.clusterInfo.runId && opts.clusterInfo.runId !== 'unknown'
+          ? ` AND RUN_ID = '${opts.clusterInfo.runId}'`
+          : '';
+
+        const segmentLines = sourceMap && Object.keys(sourceMap).length >= 1
+          ? Object.entries(sourceMap)
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([cidStr, v]) => {
+                const filter = recordIdCol
+                  ? `${recordIdCol} IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${cidStr}${runIdFilter})`
+                  : `RECORD_ID IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${cidStr}${runIdFilter})`;
+                return (
+                  `  Segment ${cidStr} = Cluster ${cidStr} — ${v.label} (${v.count} ${entityDesc}):\n` +
+                  `    SQL filter: ${filter}`
+                );
+              })
+              .join('\n')
+          : Array.from({ length: nClusters }, (_, i) => {
+              const filter = recordIdCol
+                ? `${recordIdCol} IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${i}${runIdFilter})`
+                : `RECORD_ID IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${i}${runIdFilter})`;
+              return `  Segment ${i} = Cluster ${i}:\n    SQL filter: ${filter}`;
+            }).join('\n');
+
         parts.push(
-          `\n\n[Context: The cohort was previously segmented into ${nClusters} clusters ` +
-          `(${algorithm}) by ${entityDesc}. ` +
-          `Please run the causal analysis on the same population.]`,
+          `\n\n[CLUSTER CONTEXT — REQUIRED:\n` +
+          `The cohort was previously segmented into ${nClusters} groups via ${algorithm} clustering by ${entityDesc}.\n` +
+          `When the user refers to "segment N", "cluster N", or "group N", resolve it using the mapping below.\n` +
+          `CLUSTERING_RESULTS is in CORTEX_TESTING.PUBLIC (columns: RECORD_ID VARCHAR, CLUSTER_ID INT, CLUSTER_LABEL VARCHAR).\n\n` +
+          `${segmentLines}\n\n` +
+          `Use the SQL filter shown above to scope the causal analysis to the requested segment.\n` +
+          `If no specific segment is requested, run the analysis on the full clustered population.\n` +
+          `]`,
+        );
+
+        // ── Competitive Flow table format requirement ──────────────────────────
+        // The web renderer (CausalNarrativeReport) needs a "### Competitive Flow"
+        // section with H1/H2 market share per brand to anchor the W2 waterfall
+        // chart (showing Brand7's collapse from H1 share → H2 share).
+        // Without this table, W2 falls back to a proportional display that
+        // cannot show Brand7's absolute share values on the Y-axis.
+        parts.push(
+          `\n\n[REPORT FORMAT REQUIREMENT — REQUIRED:\n` +
+          `Your output MUST include a section titled EXACTLY "### Competitive Flow" containing a markdown table with these columns:\n` +
+          `  Brand | H1 Share | H2 Share | Change\n` +
+          `List EVERY brand in the data (BRAND1, BRAND7, BRAND8, etc.) with their H1 market share (%), H2 market share (%), and pp change.\n` +
+          `This table is mandatory — without it the W2 waterfall chart cannot render the competitor's share movement correctly.\n` +
+          `]`,
         );
       }
       break;

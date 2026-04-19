@@ -662,7 +662,7 @@ async function parseSSEStream(
   appendLog(summary);
   if (fullText.length > 0) {
     console.log(`[CORTEX_AGENT] SSE fullText (first 300): ${fullText.slice(0, 300)}`);
-    appendLog(`fullText: ${fullText.slice(0, 500)}`);
+    appendLog(`fullText: ${fullText.slice(0, 6000)}`);
   }
 
   // Remove SQL/JSON code blocks from display text

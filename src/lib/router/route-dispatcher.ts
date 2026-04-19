@@ -100,6 +100,21 @@ function buildAgentResult(
   }
   // ────────────────────────────────────────────────────────────────────────────
 
+  // ── [CAUSAL_LOG] Server-side diagnostic for causal inference intents ─────────
+  if (intent.startsWith('CAUSAL')) {
+    console.log(`[CAUSAL_LOG] intent=${intent} agent=${agentRef}`);
+    console.log(`[CAUSAL_LOG] text length=${text.length} chars`);
+    console.log(`[CAUSAL_LOG] data type=${typeof data} isNull=${data == null}`);
+    console.log(`[CAUSAL_LOG] sql present=${!!sql}`);
+    if (sql) console.log(`[CAUSAL_LOG] sql (first 400):\n${sql.slice(0, 400)}`);
+    // Look for CLUSTERING_RESULTS reference in text — confirms segment scoping
+    const mentionsCR = /CLUSTERING_RESULTS/i.test(text) || /CLUSTERING_RESULTS/i.test(sql ?? '');
+    const mentionsClusterId = /CLUSTER_ID\s*=\s*\d+/i.test(text) || /CLUSTER_ID\s*=\s*\d+/i.test(sql ?? '');
+    console.log(`[CAUSAL_LOG] references CLUSTERING_RESULTS=${mentionsCR}  CLUSTER_ID filter=${mentionsClusterId}`);
+    console.log(`[CAUSAL_LOG] text (first 600):\n${text.slice(0, 600)}`);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   const artifact: AgentArtifact = {
     id: randomUUID(),
     agentName: agentRef,
@@ -376,22 +391,74 @@ const RX_TABLE_FQN =
   `${process.env.SNOWFLAKE_DATABASE ?? 'CORTEX_TESTING'}.PUBLIC.RX_TABLE`;
 
 /**
- * Build a 6-feature SELECT directly from RX_TABLE.
+ * Build a 6-feature SELECT directly from RX_TABLE, restricted to the
+ * entities returned by a prior analyst cohort query.
+ *
+ * Used when the prior analyst result has entity IDs but no numeric feature
+ * columns (e.g. a physician list with name/specialty/state only).
+ * We re-aggregate from RX_TABLE with the standard 6 features, but add
+ * an IN-subquery filter so only cohort members are included.
+ *
+ * entityKey   — bare column name that is both the GROUP BY key and the
+ *               column projected by the prior SQL (e.g. PHYSICIAN_KEY).
+ * priorSQL    — the prior analyst SELECT statement (no trailing semicolon).
+ * nFeatures   — how many features to include (default 6, max 10).
+ */
+function buildCohortScopedFeatureSQL(entityKey: string, priorSQL: string, nFeatures = 6): string {
+  const features = CLUSTER_FEATURE_POOL
+    .slice(0, Math.min(nFeatures, CLUSTER_FEATURE_POOL.length))
+    .join(',\n         ');
+
+  const cleanSQL = priorSQL
+    .replace(/--[^\n]*/g, '')
+    .replace(/;/g, '')
+    .trim();
+
+  let ctePrefix: string;
+  if (/^\s*WITH\s+/i.test(cleanSQL)) {
+    const split = splitTopLevelSelect(cleanSQL);
+    if (split) {
+      ctePrefix = `${split.cteBlock},\n_prior_cohort AS (\n${split.selectBlock}\n)`;
+    } else {
+      ctePrefix = `WITH _prior_cohort AS (\n${cleanSQL}\n)`;
+    }
+  } else {
+    ctePrefix = `WITH _prior_cohort AS (\n${cleanSQL}\n)`;
+  }
+
+  return [
+    ctePrefix,
+    `SELECT ${entityKey}::VARCHAR AS RECORD_ID,`,
+    `       OBJECT_CONSTRUCT(`,
+    `         ${features}`,
+    `       )::VARIANT AS FEATURES`,
+    `FROM   ${RX_TABLE_FQN}`,
+    `WHERE  (ptd_final_claim = 1 OR ptd_final_claim IS NULL)`,
+    `  AND  claim_status_code = '1'`,
+    `  AND  ${entityKey} IS NOT NULL`,
+    `  AND  ${entityKey}::VARCHAR IN (SELECT ${entityKey}::VARCHAR FROM _prior_cohort WHERE ${entityKey} IS NOT NULL)`,
+    `GROUP  BY ${entityKey}`,
+    `HAVING COUNT(claim_id) >= 5`,
+    `LIMIT  10000`,
+  ].join('\n');
+}
+
+/**
+ * Build an N-feature SELECT directly from RX_TABLE.
+ *
+ * Features are drawn from CLUSTER_FEATURE_POOL (first N entries).
+ * Defaults to 6; caller passes a higher count when the user requested more.
  *
  * All entity-key columns (physician_key, patient_gid, primary_plan_id,
  * drug_id) are FK columns directly on RX_TABLE, so no JOIN is needed.
  *
  * entityKey — bare column name to GROUP BY and expose as RECORD_ID.
+ * nFeatures — how many features to include (default 6, max 10).
  */
-function buildStandardFeatureSQL(entityKey: string): string {
-  const features = [
-    `'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT`,
-    `'AVG_OOP',         AVG(primary_patient_pay)::FLOAT`,
-    `'AVG_PLAN_PAY',    AVG(primary_plan_pay)::FLOAT`,
-    `'UNIQUE_DRUGS',    COUNT(DISTINCT drug_id)::FLOAT`,
-    `'UNIQUE_PATIENTS', COUNT(DISTINCT patient_gid)::FLOAT`,
-    `'FILL_RATE',       AVG(CASE WHEN claim_status_code = '1' THEN 1.0 ELSE 0.0 END)::FLOAT`,
-  ].join(',\n         ');
+function buildStandardFeatureSQL(entityKey: string, nFeatures = 6): string {
+  const features = CLUSTER_FEATURE_POOL
+    .slice(0, Math.min(nFeatures, CLUSTER_FEATURE_POOL.length))
+    .join(',\n         ');
 
   return [
     `SELECT ${entityKey}::VARCHAR AS RECORD_ID,`,
@@ -409,23 +476,25 @@ function buildStandardFeatureSQL(entityKey: string): string {
 }
 
 /**
- * Guarantee at least MIN_CLUSTER_FEATURES features in the OBJECT_CONSTRUCT.
+ * Guarantee at least nFeatures features in the OBJECT_CONSTRUCT.
  *
  * Rules:
- *  1. If the SQL already has ≥ MIN_CLUSTER_FEATURES keys → return unchanged.
+ *  1. If the SQL already has ≥ nFeatures keys → return unchanged.
  *  2. If the SQL is a CTE (PATH 1A cohort query) → return unchanged; the
  *     cohort is pre-aggregated and re-aggregating from RX_TABLE would break it.
  *  3. Otherwise (PATH 1B thin Cortex Analyst SQL) → detect the entity key
- *     and rebuild entirely from RX_TABLE with 6 standard features.
+ *     and rebuild entirely from RX_TABLE with nFeatures from the feature pool.
  *     The Cortex-Analyst FROM/WHERE is dropped because it may reference
  *     lookup tables (PHYS_REF, PATIENT, etc.) that don't have claim_id /
  *     primary_patient_pay / etc.
  */
 const MIN_CLUSTER_FEATURES = 3;
 
-function enrichClusterInputSQL(sql: string): string {
+function enrichClusterInputSQL(sql: string, nFeatures = 6): string {
   const keyCount = countObjectConstructKeys(sql);
-  if (keyCount >= MIN_CLUSTER_FEATURES) return sql;
+  // Return as-is if the SQL already satisfies BOTH the absolute minimum AND
+  // the user-requested feature count.
+  if (keyCount >= MIN_CLUSTER_FEATURES && keyCount >= nFeatures) return sql;
 
   // CTE-based cohort SQL (PATH 1A) uses _prior_cohort — columns there are
   // already aggregated, so we cannot layer RX_TABLE aggregates on top.
@@ -436,10 +505,91 @@ function enrichClusterInputSQL(sql: string): string {
     return sql;
   }
 
-  console.log(`[CLUSTER] Cortex Analyst returned only ${keyCount} feature(s) — rebuilding from ${RX_TABLE_FQN} with standard 6-feature set.`);
+  console.log(`[CLUSTER] Cortex Analyst returned only ${keyCount} feature(s); user requested ${nFeatures} — rebuilding from ${RX_TABLE_FQN}.`);
 
   const entityKey = detectEntityKey(sql) ?? 'physician_key';
-  return buildStandardFeatureSQL(entityKey);
+  return buildStandardFeatureSQL(entityKey, nFeatures);
+}
+
+/**
+ * Pre-resolve "segment N" / "cluster N" / "group N" references in a user
+ * message to an explicit label + SQL filter.
+ *
+ * Named Cortex Agents look up undefined terms against the semantic model and
+ * respond with "no predefined segment field exists".  By rewriting the message
+ * before it reaches the agent we avoid that dead-end entirely.
+ *
+ * The generated SQL filter is scoped to a specific RUN_ID when provided so
+ * that the physician_key IN (...) subquery returns only the 192 records from
+ * the relevant clustering run, not the 75 000+ accumulated across all runs.
+ *
+ * Example:
+ *   "run causal on physicians in segment 0"
+ *   → "run causal on physicians in the group "High Volume Physicians"
+ *      (192 records; SQL filter: physician_key IN (SELECT RECORD_ID FROM
+ *       CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+ *       WHERE CLUSTER_ID = 0 AND RUN_ID = '<uuid>'))"
+ */
+function resolveSegmentReferences(
+  message: string,
+  clusterSummary: Record<number, { label: string; count: number }>,
+  recordIdCol: string | undefined,
+  runId: string | undefined,
+): string {
+  const SEGMENT_RE = /\b(?:segment|cluster|group)\s+(\d+)\b/gi;
+  if (!SEGMENT_RE.test(message)) return message;
+  SEGMENT_RE.lastIndex = 0; // reset after .test()
+  return message.replace(SEGMENT_RE, (_match, numStr) => {
+    const cid = Number(numStr);
+    const info = clusterSummary[cid];
+    const label = info?.label ?? `Cluster ${cid}`;
+    const countStr = info?.count != null ? `, ${info.count} records` : '';
+    const runFilter = runId ? ` AND RUN_ID = '${runId}'` : '';
+    const filter = recordIdCol
+      ? `${recordIdCol} IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${cid}${runFilter})`
+      : `RECORD_ID IN (SELECT RECORD_ID FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS WHERE CLUSTER_ID = ${cid}${runFilter})`;
+    return `the group "${label}"${countStr} (SQL filter: ${filter})`;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Feature pool — ordered by analytical value; first 6 are always the standard
+// set, extras (7–10) are added when the user requests a larger feature count.
+// All columns exist directly on RX_TABLE (no JOINs required).
+// ---------------------------------------------------------------------------
+const CLUSTER_FEATURE_POOL: string[] = [
+  `'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT`,
+  `'AVG_OOP',         AVG(primary_patient_pay)::FLOAT`,
+  `'AVG_PLAN_PAY',    AVG(primary_plan_pay)::FLOAT`,
+  `'UNIQUE_DRUGS',    COUNT(DISTINCT drug_id)::FLOAT`,
+  `'UNIQUE_PATIENTS', COUNT(DISTINCT patient_gid)::FLOAT`,
+  `'FILL_RATE',       AVG(CASE WHEN claim_status_code = '1' THEN 1.0 ELSE 0.0 END)::FLOAT`,
+  // Extended — available when user asks for 7+ features
+  `'AVG_DAYS_SUPPLY', AVG(product_days_supply)::FLOAT`,
+  `'TOTAL_OOP',       SUM(primary_patient_pay)::FLOAT`,
+  `'TOTAL_PLAN_PAY',  SUM(primary_plan_pay)::FLOAT`,
+  `'UNIQUE_PLANS',    COUNT(DISTINCT primary_plan_id)::FLOAT`,
+];
+
+/**
+ * Extract the minimum feature count from natural-language instructions such as:
+ *   "use at least 7 features"
+ *   "minimum 8 features"
+ *   "use 7+ features"
+ *   "with 9 features"
+ *
+ * Returns the requested count clamped to [6, POOL_SIZE].
+ * Returns 6 (the default) when no count instruction is found.
+ */
+function extractMinFeatureCount(message: string): number {
+  const m =
+    message.match(/(?:at\s+least|minimum|min|use|with|using|include)\s+(\d+)\+?\s*features?/i) ??
+    message.match(/(\d+)\+\s*features?/i);
+  if (m) {
+    const requested = Number(m[1]);
+    return Math.min(Math.max(requested, 6), CLUSTER_FEATURE_POOL.length);
+  }
+  return 6;
 }
 
 /**
@@ -495,10 +645,12 @@ function buildClusterInputQuestion(message: string, nClusters: number, priorUser
 
   // If the user named specific features, generate an explicit OBJECT_CONSTRUCT hint
   // so Cortex Analyst cannot ignore them or default to a single-column fallback.
+  // Also honour a minimum-count instruction like "at least 7 features".
   const userFeatures = extractUserFeatures(message);
+  const minCount = extractMinFeatureCount(message); // honours "at least N features"
   const featureRule = userFeatures.length > 0
     ? `  - REQUIRED: The OBJECT_CONSTRUCT MUST include ALL of these user-specified features (map each to the appropriate aggregate): ${userFeatures.join(', ')}`
-    : `  - Include AT LEAST 5 diverse numeric features in OBJECT_CONSTRUCT — do NOT default to TOTAL_CLAIMS alone; add AVG_OOP, AVG_DAYS_SUPPLY, UNIQUE_DRUGS, UNIQUE_PATIENTS or equivalent metrics available in the schema`;
+    : `  - REQUIRED: Include AT LEAST ${minCount} diverse numeric features in OBJECT_CONSTRUCT — do NOT default to TOTAL_CLAIMS alone; use AVG_OOP, AVG_PLAN_PAY, AVG_DAYS_SUPPLY, UNIQUE_DRUGS, UNIQUE_PATIENTS, FILL_RATE, TOTAL_OOP, TOTAL_PLAN_PAY, UNIQUE_PLANS or equivalent RX_TABLE aggregates`;
 
   const featuresExample = userFeatures.length > 0
     ? userFeatures.slice(0, 5).map(f => `           '${f}', <aggregate of ${f}>::FLOAT`).join(',\n')
@@ -804,10 +956,12 @@ export class RouteDispatcher {
           .find((m) => m.role === 'assistant' && m.intent === 'ANALYST')
           ?.content;
         const isForecastIntent = /^FORECAST_/.test(intent) || intent === 'FORECAST_COMPARE' as string;
+        const isCausalIntent = /^CAUSAL/.test(intent);
         const clusterInfo = this.context.getLastClusterMeta?.();
 
-        // ── Cluster context for forecast ──────────────────────────────────
-        // When a clustering run preceded this forecast we try two things:
+        // ── Cluster context for forecast / causal ─────────────────────────
+        // When a clustering run preceded this forecast or causal request we
+        // try two things:
         //
         // 1. Fetch per-cluster label+count (lightweight summary).
         // 2. Compute per-cluster metric thresholds by joining the prior cohort
@@ -815,17 +969,31 @@ export class RouteDispatcher {
         //    forecast agent filter via plain "metric BETWEEN min AND max" SQL —
         //    no CLUSTERING_RESULTS reference required (Cortex Analyst cannot
         //    resolve that table since it is outside the semantic model).
+        //    Causal agents CAN reference CLUSTERING_RESULTS directly, but the
+        //    summary still lets us build the segment→label mapping injected into
+        //    the enriched message.
         let clusterSummary: Record<number, { label: string; count: number }> | undefined;
         let clusterThresholds: Record<number, {
           label: string; count: number; metricCol: string; minVal: number; maxVal: number;
         }> | undefined;
 
-        if (clusterInfo && isForecastIntent) {
-          // Step 1 — lightweight summary (labels + counts)
+        // ── Step 1: Fetch cluster summary ─────────────────────────────────────
+        // Always fetch when a prior in-memory clustering run is known (forecast
+        // or causal follow-up), OR when a causal intent references a segment by
+        // number even without in-memory cluster meta — this handles the common
+        // case where clustering was done in a prior browser session.
+        const hasCausalSegmentRef = isCausalIntent &&
+          /\b(?:segment|cluster|group)\s+\d+\b/i.test(message);
+
+        if ((clusterInfo && (isForecastIntent || isCausalIntent)) || hasCausalSegmentRef) {
           try {
+            // Scope to the latest run only — without this filter the GROUP BY
+            // aggregates across all historical runs, inflating per-cluster counts
+            // dramatically (e.g. 192 → 75 485 for a table with many prior runs).
             const summaryResult = await executeSQL(
               `SELECT CLUSTER_ID, MAX(CLUSTER_LABEL) AS CLUSTER_LABEL, COUNT(*) AS RECORD_CNT
                FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+               WHERE RUN_TIMESTAMP = (SELECT MAX(RUN_TIMESTAMP) FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS)
                GROUP BY CLUSTER_ID ORDER BY CLUSTER_ID`,
               SNOWFLAKE_ROLE, signal,
             );
@@ -837,16 +1005,63 @@ export class RouteDispatcher {
                 const cnt = Number(row['RECORD_CNT'] ?? row['record_cnt'] ?? 0);
                 clusterSummary[cid] = { label: lbl, count: cnt };
               }
-              console.log(`[FORECAST] Cluster summary: ${
+              console.log(`[CLUSTER_CTX] Cluster summary: ${
                 Object.entries(clusterSummary).map(([k, v]) => `Cluster ${k} (${v.label}): ${v.count}`).join(', ')}`);
             }
           } catch (err) {
-            console.warn('[FORECAST] Could not fetch cluster summary:', err instanceof Error ? err.message : String(err));
+            console.warn('[CLUSTER_CTX] Could not fetch cluster summary:', err instanceof Error ? err.message : String(err));
           }
+        }
 
-          // Step 2 — metric thresholds (joins prior cohort SQL + CLUSTERING_RESULTS)
-          // Find the primary numeric metric column from the prior analyst result.
-          // Exclude the entity key, date-like columns, and count-style columns.
+        // ── Step 2: Synthesise clusterInfo from CLUSTERING_RESULTS when the
+        //    in-memory record is absent (cross-session scenario) ───────────────
+        // CLUSTERING_RESULTS stores ALGORITHM, N_SEGMENTS_USED, and RUN_TIMESTAMP
+        // on every row.  Query the latest run to reconstruct enough metadata for
+        // message enrichment.  The semantic model relationship
+        // (CLUSTERING_RESULTS.RECORD_ID = physician_ref.physician_key) means the
+        // CI agent can resolve the physician key join itself — we use
+        // 'physician_key' as the default recordIdCol since that is what the
+        // relationship exposes.
+        let effectiveClusterInfo = clusterInfo ?? undefined;
+        if (!effectiveClusterInfo && hasCausalSegmentRef && clusterSummary) {
+          try {
+            // Fetch a single representative row from the latest run so we can
+            // get ALGORITHM, N_SEGMENTS_USED, and — critically — the exact RUN_ID.
+            // Using LIMIT 1 instead of MAX(RUN_ID) avoids lexicographic UUID
+            // ordering issues when multiple runs share the same RUN_TIMESTAMP.
+            const latestRunResult = await executeSQL(
+              `SELECT ALGORITHM, N_SEGMENTS_USED, RUN_ID
+               FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+               WHERE RUN_TIMESTAMP = (
+                 SELECT MAX(RUN_TIMESTAMP) FROM CORTEX_TESTING.PUBLIC.CLUSTERING_RESULTS
+               )
+               LIMIT 1`,
+              SNOWFLAKE_ROLE, signal,
+            );
+            if (latestRunResult.rowCount > 0) {
+              const row = latestRunResult.rows[0];
+              effectiveClusterInfo = {
+                nClusters: Number(row['N_SEGMENTS_USED'] ?? row['n_segments_used'] ?? Object.keys(clusterSummary).length),
+                recordIdCol: 'physician_key', // default: matches CLUSTERING_RESULTS.RECORD_ID semantic model relationship
+                algorithm: String(row['ALGORITHM'] ?? row['algorithm'] ?? 'Clustering'),
+                runId: String(row['RUN_ID'] ?? row['run_id'] ?? 'unknown'),
+              };
+              console.log(`[CLUSTER_CTX] Synthetic clusterInfo from CLUSTERING_RESULTS: ` +
+                `algorithm=${effectiveClusterInfo.algorithm} nClusters=${effectiveClusterInfo.nClusters} ` +
+                `recordIdCol=${effectiveClusterInfo.recordIdCol} (cross-session)`);
+            }
+          } catch (err) {
+            console.warn('[CLUSTER_CTX] Could not synthesise clusterInfo from CLUSTERING_RESULTS:', err instanceof Error ? err.message : String(err));
+          }
+        }
+
+        // ── Step 3: Metric thresholds for forecast scoping ────────────────────
+        // Joins the prior cohort SQL with CLUSTERING_RESULTS so the forecast
+        // agent can filter via plain BETWEEN expressions (no CLUSTERING_RESULTS
+        // reference needed in its SQL, which Cortex Analyst cannot resolve for
+        // forecast intents).  Only runs when we have a real (not synthetic)
+        // clusterInfo — synthetic info has no prior cohort SQL to join.
+        if (clusterInfo && isForecastIntent) {
           const recordIdCol = clusterInfo.recordIdCol;
           const metricCol = priorAnalyst?.columns?.find(c =>
             c !== recordIdCol &&
@@ -854,7 +1069,6 @@ export class RouteDispatcher {
           );
           if (lastSQL && recordIdCol && metricCol && clusterSummary && Object.keys(clusterSummary).length >= 2) {
             try {
-              // Strip comments, semicolons, and trailing ORDER BY to make a safe CTE
               const cleanSQL = lastSQL
                 .replace(/--[^\n]*/g, '')
                 .replace(/;/g, '')
@@ -883,20 +1097,38 @@ export class RouteDispatcher {
                   const maxV = Number(row['MAX_VAL'] ?? row['max_val'] ?? 0);
                   clusterThresholds[cid] = { label: lbl, count: cnt, metricCol, minVal: minV, maxVal: maxV };
                 }
-                console.log(`[FORECAST] Cluster thresholds (${metricCol}): ${
+                console.log(`[CLUSTER_CTX] Cluster thresholds (${metricCol}): ${
                   Object.entries(clusterThresholds).map(([k, v]) => `Cluster ${k}: ${v.minVal}–${v.maxVal}`).join(', ')}`);
               }
             } catch (err) {
-              console.warn('[FORECAST] Could not compute cluster thresholds:', err instanceof Error ? err.message : String(err));
+              console.warn('[CLUSTER_CTX] Could not compute cluster thresholds:', err instanceof Error ? err.message : String(err));
             }
           }
         }
 
-        const enriched = enrichMessage(message, intent, {
+        // ── Step 4: Resolve "segment N" references in the user message ────────
+        // Rewrites "segment 0" → "the group 'High Volume Physicians', 192 records
+        // (SQL filter: physician_key IN (SELECT RECORD_ID FROM CLUSTERING_RESULTS
+        // WHERE CLUSTER_ID = 0))" so the agent receives an explicit filter rather
+        // than an undefined term it will look up in the semantic model.
+        const resolvedMessage = isCausalIntent && clusterSummary && effectiveClusterInfo
+          ? resolveSegmentReferences(message, clusterSummary, effectiveClusterInfo.recordIdCol, effectiveClusterInfo.runId)
+          : message;
+        if (isCausalIntent) {
+          if (resolvedMessage !== message) {
+            console.log(`[CAUSAL] Segment references resolved in message: "${resolvedMessage.slice(0, 400)}"`);
+          } else if (hasCausalSegmentRef && !clusterSummary) {
+            console.warn(`[CAUSAL] clusterSummary unavailable — segment references NOT resolved. ` +
+              `clusterInfo=${!!clusterInfo} effectiveClusterInfo=${!!effectiveClusterInfo}. ` +
+              `"segment N" in message will be sent as-is to agent.`);
+          }
+        }
+
+        const enriched = enrichMessage(resolvedMessage, intent, {
           priorSQL: lastSQL ?? undefined,
           priorColumns: priorAnalyst?.columns,
           priorNarrative: lastAnalystNarrative,
-          clusterInfo: clusterInfo ?? undefined,
+          clusterInfo: effectiveClusterInfo,
           clusterSummary,
           clusterThresholds,
         });
@@ -1161,6 +1393,12 @@ export class RouteDispatcher {
 
     const priorAnalyst = this.context.getLastAnalystResult?.();
     const userFeatures = extractUserFeatures(message);
+    // How many features the user wants — respects "at least N features" phrasing.
+    // Used by all three SQL-building paths (1A, 1A-SCOPED, 1B) to guarantee the
+    // correct feature count regardless of which path runs.
+    const nFeatures = extractMinFeatureCount(message);
+    console.log(`[CLUSTER] Requested feature count: ${nFeatures}`);
+
     if (priorAnalyst?.sql && priorAnalyst.columns.length > 0) {
       console.log(`[CLUSTER] Prior cohort detected (${priorAnalyst.columns.length} cols). Building RECORD_ID+FEATURES from prior SQL directly.`);
       const cohortSQL = buildCohortClusterSQL(priorAnalyst.sql, priorAnalyst.columns);
@@ -1174,13 +1412,24 @@ export class RouteDispatcher {
       );
       const minFeatures = userFeatures.length > 0 ? 1 : 3; // if user specified features, trust PATH 1A; otherwise need ≥3
       if (cohortSQL && priorFeatureCols.length >= minFeatures) {
-        // Even cohort-built SQL may have thin features if the prior query was narrow.
-        const enriched = enrichClusterInputSQL(cohortSQL);
-        console.log(`[CLUSTER] Cohort SQL (first 300): ${enriched.slice(0, 300)}`);
+        // Even cohort-built SQL may have thin features if the prior query was narrow,
+        // or if the user requested more features than it contains.
+        const enriched = enrichClusterInputSQL(cohortSQL, nFeatures);
+        console.log(`[CLUSTER] PATH 1A cohort SQL (first 300): ${enriched.slice(0, 300)}`);
         inputQuery = enriched;
       } else {
-        console.log(`[CLUSTER] Prior cohort has only ${priorFeatureCols.length} feature col(s) — falling back to Cortex Analyst for richer feature set.`);
-        inputQuery = '';
+        // PATH 1A-SCOPED: The prior cohort has entity IDs but no numeric feature
+        // columns (e.g. a physician filter returning name/specialty/state).
+        // Re-aggregate from RX_TABLE with nFeatures features, but restrict
+        // to only the entities from the cohort via an IN-subquery CTE filter.
+        // This guarantees the correct cohort scope while providing rich features.
+        // We do NOT fall through to Cortex Analyst here — it has no knowledge of
+        // the cohort and would generate a query over the full population.
+        const ENTITY_ID_RE = /key|_id$|^id_|^npi|gid|identifier/i;
+        const idCol = priorAnalyst.columns.find(c => ENTITY_ID_RE.test(c)) ?? priorAnalyst.columns[0];
+        console.log(`[CLUSTER] PATH 1A-SCOPED: ${priorFeatureCols.length} feature col(s) in prior cohort — scoping RX_TABLE query to cohort via entity key "${idCol}" with ${nFeatures} features`);
+        inputQuery = buildCohortScopedFeatureSQL(idCol, priorAnalyst.sql, nFeatures);
+        console.log(`[CLUSTER] PATH 1A-SCOPED SQL (first 300): ${inputQuery.slice(0, 300)}`);
       }
     } else {
       inputQuery = '';
@@ -1221,9 +1470,9 @@ export class RouteDispatcher {
       }
       inputQuery = analystResp.sql.trim().replace(/;\s*$/, '');
 
-      // Cortex Analyst often simplifies to a single-feature OBJECT_CONSTRUCT.
-      // Guarantee at least MIN_CLUSTER_FEATURES features by patching thin SQL.
-      inputQuery = enrichClusterInputSQL(inputQuery);
+      // Cortex Analyst may return fewer features than requested.
+      // Rebuild from RX_TABLE if the SQL has fewer than nFeatures keys.
+      inputQuery = enrichClusterInputSQL(inputQuery, nFeatures);
     }
 
     console.log(`[CLUSTER] Input query (first 300): ${inputQuery.slice(0, 300)}`);

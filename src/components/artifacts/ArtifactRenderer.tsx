@@ -10,6 +10,7 @@ import WaterfallArtifact from './WaterfallArtifact'
 import MTreeArtifact from './MTreeArtifact'
 import ClusterProfileArtifact from './ClusterProfileArtifact'
 import CausalResultArtifact from './CausalResultArtifact'
+import CausalNarrativeReport from './CausalNarrativeReport'
 import ClusterCompareArtifact from './ClusterCompareArtifact'
 import {
   BarChart,
@@ -120,8 +121,29 @@ export default function ArtifactRenderer({ artifact }: Props) {
       return <ClusterProfileArtifact artifact={artifact} />
     case 'cluster_comparison':
       return <ClusterCompareArtifact artifact={artifact} />
-    case 'causal':
+    case 'causal': {
+      // The CI named agent returns a rich markdown narrative (stored in
+      // artifact.narrative).  CausalNarrativeReport is the purpose-built
+      // formatter for that text: it parses waterfall sections, competitive
+      // tables, and recommendations into charts + collapsible panels.
+      //
+      // Fall back to CausalResultArtifact only when the agent returned
+      // pre-structured JSON data ({ subtype, drivers[], tests[], ... }) —
+      // that path is used by pipeline sub-steps that emit machine-readable
+      // payloads rather than human-readable narrative.
+      const hasStructuredData =
+        data != null &&
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        ('subtype' in data ||
+          ('drivers' in data && Array.isArray((data as Record<string, unknown>)['drivers'])) ||
+          ('tests'   in data && Array.isArray((data as Record<string, unknown>)['tests'])));
+
+      if (!hasStructuredData && artifact.narrative) {
+        return <CausalNarrativeReport narrative={artifact.narrative} />
+      }
       return <CausalResultArtifact artifact={artifact} />
+    }
     case 'chart':
       return <GenericChart artifact={artifact} />
     case 'narrative':
