@@ -358,34 +358,32 @@ function countObjectConstructKeys(sql: string): number {
 
 /**
  * Detect the entity key that will become RECORD_ID.
- * Returns the column name (e.g. "physician_key", "patient_gid") or null.
+ * Strips any table alias prefix (e.g. "p.physician_key" → "physician_key").
+ * Returns the bare column name (e.g. "physician_key", "patient_gid") or null.
  */
 function detectEntityKey(sql: string): string | null {
-  // Match: <col>::VARCHAR AS RECORD_ID   OR   CAST(<col> AS VARCHAR) AS RECORD_ID
-  const cast1 = sql.match(/(\w+)\s*::\s*VARCHAR\s+AS\s+RECORD_ID/i);
+  // Match: [alias.]<col>::VARCHAR AS RECORD_ID
+  const cast1 = sql.match(/(?:\w+\.)?(\w+)\s*::\s*VARCHAR\s+AS\s+RECORD_ID/i);
   if (cast1) return cast1[1];
-  const cast2 = sql.match(/CAST\s*\(\s*(\w+)\s+AS\s+VARCHAR\s*\)\s+AS\s+RECORD_ID/i);
+  // Match: CAST([alias.]<col> AS VARCHAR) AS RECORD_ID
+  const cast2 = sql.match(/CAST\s*\(\s*(?:\w+\.)?(\w+)\s+AS\s+VARCHAR\s*\)\s+AS\s+RECORD_ID/i);
   if (cast2) return cast2[1];
   return null;
 }
 
+/** Fully-qualified RX_TABLE used as the standard base for feature enrichment. */
+const RX_TABLE_FQN =
+  `${process.env.SNOWFLAKE_DATABASE ?? 'CORTEX_TESTING'}.PUBLIC.RX_TABLE`;
+
 /**
- * Build standard multi-feature physician/plan/patient/drug OBJECT_CONSTRUCT
- * columns using RX_TABLE aggregates.  Used when Cortex Analyst produces a
- * thin single-feature OBJECT_CONSTRUCT.
+ * Build a 6-feature SELECT directly from RX_TABLE.
  *
- * entityKey   — column that becomes RECORD_ID (physician_key, patient_gid, …)
- * fromClause  — FROM … (JOIN …) block from the Cortex Analyst SQL
- * whereClause — raw WHERE predicate (may be empty string)
- * groupByCol  — column name to GROUP BY (usually = entityKey)
+ * All entity-key columns (physician_key, patient_gid, primary_plan_id,
+ * drug_id) are FK columns directly on RX_TABLE, so no JOIN is needed.
+ *
+ * entityKey — bare column name to GROUP BY and expose as RECORD_ID.
  */
-function buildStandardFeatureSQL(
-  entityKey: string,
-  fromClause: string,
-  whereClause: string,
-  groupByCol: string,
-): string {
-  // Standard analytics aggregates available on RX_TABLE
+function buildStandardFeatureSQL(entityKey: string): string {
   const features = [
     `'TOTAL_CLAIMS',    COUNT(claim_id)::FLOAT`,
     `'AVG_OOP',         AVG(primary_patient_pay)::FLOAT`,
@@ -395,49 +393,53 @@ function buildStandardFeatureSQL(
     `'FILL_RATE',       AVG(CASE WHEN claim_status_code = '1' THEN 1.0 ELSE 0.0 END)::FLOAT`,
   ].join(',\n         ');
 
-  const where = whereClause.trim()
-    ? `WHERE  ${whereClause.trim()}\n`
-    : `WHERE  (ptd_final_claim = 1 OR ptd_final_claim IS NULL)\n  AND  claim_status_code = '1'\n`;
-
   return [
-    `SELECT ${groupByCol}::VARCHAR AS RECORD_ID,`,
+    `SELECT ${entityKey}::VARCHAR AS RECORD_ID,`,
     `       OBJECT_CONSTRUCT(`,
     `         ${features}`,
     `       )::VARIANT AS FEATURES`,
-    `FROM   ${fromClause.trim()}`,
-    where.trimEnd(),
-    `GROUP  BY ${groupByCol}`,
+    `FROM   ${RX_TABLE_FQN}`,
+    `WHERE  (ptd_final_claim = 1 OR ptd_final_claim IS NULL)`,
+    `  AND  claim_status_code = '1'`,
+    `  AND  ${entityKey} IS NOT NULL`,
+    `GROUP  BY ${entityKey}`,
     `HAVING COUNT(claim_id) >= 5`,
     `LIMIT  10000`,
   ].join('\n');
 }
 
 /**
- * Guarantee at least MIN_FEATURES features in the OBJECT_CONSTRUCT.
+ * Guarantee at least MIN_CLUSTER_FEATURES features in the OBJECT_CONSTRUCT.
  *
- * When Cortex Analyst returns a thin query (e.g. only TOTAL_CLAIMS), we
- * preserve the FROM / WHERE / entity key it correctly identified, and
- * replace the feature block with our own standard 6-feature set.
+ * Rules:
+ *  1. If the SQL already has ≥ MIN_CLUSTER_FEATURES keys → return unchanged.
+ *  2. If the SQL is a CTE (PATH 1A cohort query) → return unchanged; the
+ *     cohort is pre-aggregated and re-aggregating from RX_TABLE would break it.
+ *  3. Otherwise (PATH 1B thin Cortex Analyst SQL) → detect the entity key
+ *     and rebuild entirely from RX_TABLE with 6 standard features.
+ *     The Cortex-Analyst FROM/WHERE is dropped because it may reference
+ *     lookup tables (PHYS_REF, PATIENT, etc.) that don't have claim_id /
+ *     primary_patient_pay / etc.
  */
 const MIN_CLUSTER_FEATURES = 3;
 
 function enrichClusterInputSQL(sql: string): string {
   const keyCount = countObjectConstructKeys(sql);
-  if (keyCount >= MIN_CLUSTER_FEATURES) return sql; // already rich enough
+  if (keyCount >= MIN_CLUSTER_FEATURES) return sql;
 
-  console.log(`[CLUSTER] Cortex Analyst returned only ${keyCount} feature(s) in OBJECT_CONSTRUCT — enriching with standard feature set.`);
+  // CTE-based cohort SQL (PATH 1A) uses _prior_cohort — columns there are
+  // already aggregated, so we cannot layer RX_TABLE aggregates on top.
+  // Return as-is; if it genuinely has too few features the caller will
+  // fall through to PATH 1B.
+  if (/\b_prior_cohort\b/i.test(sql)) {
+    console.log(`[CLUSTER] CTE-based cohort SQL has ${keyCount} feature(s) — skipping enrichment to avoid breaking aggregated CTE.`);
+    return sql;
+  }
+
+  console.log(`[CLUSTER] Cortex Analyst returned only ${keyCount} feature(s) — rebuilding from ${RX_TABLE_FQN} with standard 6-feature set.`);
 
   const entityKey = detectEntityKey(sql) ?? 'physician_key';
-
-  // Extract FROM clause (everything between FROM and first of WHERE/GROUP/HAVING/LIMIT)
-  const fromMatch = sql.match(/\bFROM\b\s+([\s\S]+?)(?=\bWHERE\b|\bGROUP\b|\bHAVING\b|\bLIMIT\b|$)/i);
-  const fromClause = fromMatch ? fromMatch[1].trim() : 'CORTEX_TESTING.PUBLIC.RX_TABLE';
-
-  // Extract WHERE clause (between WHERE and first of GROUP/HAVING/LIMIT)
-  const whereMatch = sql.match(/\bWHERE\b\s+([\s\S]+?)(?=\bGROUP\b|\bHAVING\b|\bLIMIT\b|$)/i);
-  const whereClause = whereMatch ? whereMatch[1].trim() : '';
-
-  return buildStandardFeatureSQL(entityKey, fromClause, whereClause, entityKey);
+  return buildStandardFeatureSQL(entityKey);
 }
 
 /**

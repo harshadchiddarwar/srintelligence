@@ -101,10 +101,14 @@ export async function classifyIntent(params: {
   const FORECAST_KEYWORD_RE = /\bforecast(?:ing)?\b|\bpredict(?:ion)?\b|\bproject(?:ion)?\b/i;
   const CAUSAL_KEYWORD_RE   = /\bcausal\b|\bdriver[s]?\b|\battribut(?:e|ion)\b|\bcontribut(?:e|ion)\b/i;
   const MTREE_KEYWORD_RE    = /\bmtree\b|\bmeta.?tree\b|\bdecision.?tree\b/i;
+  // Any explicit @Agent tag is a deliberate invocation — never suppress it.
+  // This covers @Causal, @CI, @Forecast, @Forecast/Prophet, @MTree, etc.
+  const EXPLICIT_AGENT_TAG_RE = /@(?:Causal|CI|Forecast|MTree|Decision|Clustering)\b/i;
   const isOtherMLRequest =
     FORECAST_KEYWORD_RE.test(message) ||
     CAUSAL_KEYWORD_RE.test(message)   ||
-    MTREE_KEYWORD_RE.test(message);
+    MTREE_KEYWORD_RE.test(message)    ||
+    EXPLICIT_AGENT_TAG_RE.test(message);
 
   if (priorIntents.some((i) => CLUSTER_INTENTS.has(i)) && !isOtherMLRequest) {
     if (!NEW_CLUSTER_REQUEST_RE.test(message)) {
